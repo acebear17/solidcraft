@@ -274,6 +274,19 @@ A material sets mass, centre of gravity and strength values. How the body looks 
 - **Elsewhere:** material, physical material.
 - **For translators:** not an appearance.
 
+### mitre gap
+
+The space left between the ends of two sheet metal flanges that are cut to meet at a corner.
+
+Each end is cut on a line chosen so that the edges nearest each other run parallel, this far apart,
+either side of the plane halfway between the flanges. The sheet metal rule's gap is the default.
+
+- **In SolidCraft:** `mitre` and `mitre_gap` in `sheet.flange` and the `sheet_flange` design-file
+  feature; the Flange dialog's Mitre corners option and Mitre Gap row; the rule's `gap`.
+- **Don't use:** corner gap, flange gap for a feature's own value.
+- **Elsewhere:** miter gap, corner gap.
+- **For translators:** not a hem gap (the space a hem leaves) and not a corner relief.
+
 ### moment of inertia
 
 How a body's mass resists turning about an axis: the mass times the square of its distance from
@@ -486,6 +499,7 @@ share a catalogue entry. Each meaning below gets its own term and, in time, its 
 | | a named set of preferences | *settings profile* | `settings.profile.*`, Preferences › General |
 | Gap | the space a hem leaves | hem gap | the Hem dialog's Gap row |
 | | an open end in the sketch continuity legend | open end | the sketch continuity legend |
+| | the space between two flanges' ends at a mitred corner | mitre gap | the Flange dialog's Mitre Gap row, `mitre_gap` |
 | Clearance | the Clearance command | clearance check | `inspect.clearance` |
 | | a minimum distance field | clearance | the Interference and plastic rules dialogs |
 | Flat | a hole's flat bottom | flat bottom | the Hole dialog's tip |

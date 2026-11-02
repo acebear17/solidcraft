@@ -153,6 +153,22 @@ opposite ways, ends that would overlap in the flat pattern) stays open, and the 
 reports a warning saying where. A flange added by a later feature leaves the corner as it was:
 the earlier flange keeps its length and the new one ends at its bend.
 
+An edge flange feature can choose its own **mitre gap** (`mitre_gap` in `sheet.flange`, a length
+or an expression of at least 0.01 mm; Mitre Gap in the Flange dialog's Advanced section, empty for
+the rule's): its corners, and those of its returns and side flanges, close as above with that gap
+in place of the rule's. The rule keeps its own gap for every other feature. With `"mitre": false`
+(Mitre corners unticked in the dialog's Options) the feature's flanges are not mitred at all: each
+corner between them stays as the bends leave it, each panel ending square where its bend ends, as
+between flanges of separate features, and gets no corner relief, so `mitre: false` refuses
+`mitre_gap`, `corner_relief_shape` and `corner_relief`. A base or contour flange takes its corners
+from the rule and refuses both. Both are saved with the feature; a design that has them asks an
+older SolidCraft for an update.
+
+```json
+{"command":"sheet.flange","params":{"edges":[[60,0,2],[0,45,2]],"height":20,"mitre_gap":"2 mm"}}
+{"command":"sheet.flange","params":{"edges":[[60,90,2],[120,45,2]],"height":20,"mitre":false}}
+```
+
 The flanges of one edge flange feature can each have an angle and a height of their own. An
 entry of `edges` is a point `[x, y, z]`, which takes the feature's `height` and `angle`, or an
 object `{"point": [x, y, z], "angle": "105 deg", "height": "30 mm"}` whose `angle` and `height`

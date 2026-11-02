@@ -1193,6 +1193,16 @@ pub enum FeatureKind {
         /// virtual sharp (`sheet::HeightFrom`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         height_from: Option<String>,
+        /// `Some(false)`: the feature's flanges are not mitred toward each other, and their
+        /// corners stay as the bends leave them (`sheet::ReliefOverride::open`). None mitres
+        /// them, as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mitre: Option<bool>,
+        /// The gap the feature's corners are mitred with, in place of the rule's. Walked after
+        /// `corner_relief`, so the inputs before it keep their names.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[walk(length = "Mitre gap")]
+        mitre_gap: Option<Expr>,
     },
     /// Flat hems on sheet edges.
     SheetHem {

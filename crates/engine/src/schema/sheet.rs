@@ -338,7 +338,8 @@ impl JsonSchema for PerforationPattern {
 /// Add a sheet metal flange: a base flange from sketch profiles, a contour flange along an open
 /// chain of sketch lines, or edge flanges on a sheet's edges. Thickness, K-factor, bend radius
 /// and reliefs come from the sheet metal rule (`sheet.manage_rules`), so those keys are refused;
-/// an edge flange may set its own `radius` and corner relief. `participants` changes nothing.
+/// an edge flange may set its own `radius`, corner relief and mitre. `participants` changes
+/// nothing.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct FlangeParams {
@@ -409,6 +410,15 @@ pub struct FlangeParams {
     /// Refused on a base or contour flange.
     #[serde(default)]
     pub corner_relief: Option<LengthExpr>,
+    /// Edge: whether the corners between these flanges are closed (mitred) toward each other.
+    /// False leaves them open, as between flanges of separate features, and refuses `mitre_gap`
+    /// and the corner relief. Default: true. Refused on a base or contour flange.
+    #[serde(default)]
+    pub mitre: Option<bool>,
+    /// Edge: the gap the corners between these flanges are mitred with, at least 0.01 mm, in place
+    /// of the rule's `gap`. Refused on a base or contour flange.
+    #[serde(default)]
+    pub mitre_gap: Option<LengthExpr>,
     /// Edge: further bends, each a flange on the far edge of the one before (at most 16). Refused
     /// on a base or contour flange.
     #[serde(default)]

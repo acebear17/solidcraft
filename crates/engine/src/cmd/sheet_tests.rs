@@ -3946,6 +3946,190 @@ fn a_corner_relief_of_an_edge_flange_is_saved_with_it_and_designs_without_one_sa
     assert!(flange_features(&s)[0].get("corner_relief").is_none());
 }
 
+/// The flat pattern's outline points and what the DXF draws (line ends, arcs), checked against
+/// each other: every corner of the flat outline is the end of a DXF line.
+fn flat_and_dxf(s: &mut Session) -> (Vec<(f64, f64)>, (Vec<(solidcraft_geom::Vec2, f64)>, Vec<solidcraft_geom::Vec2>)) {
+    let outline = outline_points(&flat(s));
+    let drawn = relief_drawing(s);
+    for &(x, y) in &outline {
+        let p = solidcraft_geom::Vec2::new(x, y);
+        assert!(drawn.1.iter().any(|q| q.dist(p) < 1e-6), "the DXF has no line ending at the flat outline's ({x}, {y})");
+    }
+    (outline, drawn)
+}
+
+/// Two drawings are the same when each line end and arc of one is in the other.
+fn same_drawing(
+    a: &(Vec<(solidcraft_geom::Vec2, f64)>, Vec<solidcraft_geom::Vec2>),
+    b: &(Vec<(solidcraft_geom::Vec2, f64)>, Vec<solidcraft_geom::Vec2>),
+) -> bool {
+    let ends = |x: &[solidcraft_geom::Vec2], y: &[solidcraft_geom::Vec2]| x.iter().all(|p| y.iter().any(|q| q.dist(*p) < 1e-6));
+    let arcs = |x: &[(solidcraft_geom::Vec2, f64)], y: &[(solidcraft_geom::Vec2, f64)]| {
+        x.iter().all(|(c, r)| y.iter().any(|(d, q)| c.dist(*d) < 1e-6 && (r - q).abs() < 1e-6))
+    };
+    a.1.len() == b.1.len() && a.0.len() == b.0.len() && ends(&a.1, &b.1) && ends(&b.1, &a.1) && arcs(&a.0, &b.0) && arcs(&b.0, &a.0)
+}
+
+#[test]
+fn an_edge_flange_feature_mitres_its_corners_with_its_own_gap() {
+    // The rule's gap is 0.5 mm. The flanges at the origin ask for 2 mm of their own; with a rule of
+    // 2 mm and the flanges at (120, 90) asking for 0.5 mm, the part is the same, folded and flat.
+    let mut own = two_flange_groups(json!({}), json!({"mitre_gap": "2 mm"}), json!({}));
+    assert!(no_errors_or_warnings(&own), "{:?}", own.model.results);
+    let mut swapped = two_flange_groups(json!({"gap": "2 mm"}), json!({}), json!({"mitre_gap": "0.5 mm"}));
+    assert!(no_errors_or_warnings(&swapped), "{:?}", swapped.model.results);
+    let mut plain = two_flange_groups(json!({}), json!({}), json!({}));
+    let (v, v0) = (volume(&mut own), volume(&mut plain));
+    assert!((volume(&mut swapped) - v).abs() < 1e-6 * v, "{} vs {v}", volume(&mut swapped));
+    // At 90° a panel's end at a corner is at T + gap/√2 from the edge (the inner edges, on faces T
+    // in, are the gap apart across the corner's diagonal), so it moves back by the change of gap
+    // over √2: 1.5/√2 along a leg of 20 − 3 = 17, 2 mm thick, on both panels of the corner.
+    let want = 2.0 * 1.5 / std::f64::consts::SQRT_2 * 17.0 * 2.0;
+    assert!((v0 - v - want).abs() < 0.05, "{v0} - {v} vs {want}");
+    let (outline, drawn) = flat_and_dxf(&mut own);
+    let (outline_swapped, drawn_swapped) = flat_and_dxf(&mut swapped);
+    let mut a = outline.clone();
+    let mut b = outline_swapped;
+    a.sort_by(|p, q| p.partial_cmp(q).unwrap_or(std::cmp::Ordering::Equal));
+    b.sort_by(|p, q| p.partial_cmp(q).unwrap_or(std::cmp::Ordering::Equal));
+    assert!(a.len() == b.len() && a.iter().zip(&b).all(|(p, q)| (p.0 - q.0).abs() < 1e-6 && (p.1 - q.1).abs() < 1e-6), "{a:?} vs {b:?}");
+    assert!(same_drawing(&drawn, &drawn_swapped), "{drawn:?} vs {drawn_swapped:?}");
+    assert!(!same_drawing(&drawn, &flat_and_dxf(&mut plain).1), "the feature's gap moved the ends in the DXF");
+    // The rule keeps its own gap: what a later feature does is the rule's.
+    let listed = run(&mut own, "sheet.rules", json!({}));
+    assert_eq!(listed["rules"][0]["rule"]["gap"], json!("0.5 mm"));
+    // Unfolding, refolding and reopening the design keep it.
+    run(&mut own, "sheet.unfold", json!({}));
+    run(&mut own, "sheet.refold", json!({}));
+    assert!((volume(&mut own) - v).abs() < 1e-6 * v);
+    let mut reopened = Session::new(solidcraft_doc::Document::from_json(&own.doc.to_json()).unwrap());
+    assert!((volume(&mut reopened) - v).abs() < 1e-6 * v);
+    assert!(same_drawing(&flat_and_dxf(&mut reopened).1, &drawn));
+    // The gap is an input of the feature, after its height and angle: a parameter change moves it.
+    let near = own.doc.features.iter().find(|f| matches!(f.kind, solidcraft_doc::FeatureKind::SheetFlange { .. }));
+    let names = near.map(|f| f.param_names.clone()).unwrap_or_default();
+    assert_eq!(names.len(), 3, "height, angle and the mitre gap: {names:?}");
+    run(&mut own, "parameters.change", json!({"name": names[2], "expression": "0.5 mm"}));
+    assert!((volume(&mut own) - v0).abs() < 1e-6 * v0, "back at the rule's gap");
+}
+
+#[test]
+fn an_edge_flange_feature_can_leave_its_corners_open() {
+    // Open, the two flanges at the origin end square where their bends end: the base is cut back to
+    // [3, 120] x [3, 90], each bend is π wide (π/2·(R + K·T)) and each leg 17, all 2 mm thick.
+    let mut s = two_flange_groups(json!({}), json!({"mitre": false}), json!({}));
+    assert!(no_errors_or_warnings(&s), "{:?}", s.model.results);
+    let mut plain = two_flange_groups(json!({}), json!({}), json!({}));
+    let near = s.model.state().sheets.last().map(|b| b.flanges.iter().take(2).map(|f| (f.ext, f.len)).collect::<Vec<_>>()).unwrap_or_default();
+    assert!(near.iter().all(|(ext, _)| *ext == (0.0, 0.0)), "{near:?}");
+    // The far corner is closed as before, so only the near corner differs from the mitred part.
+    // Mitred at 90°, each panel's end runs on past its bend's end (3 in from the edges) to
+    // T + gap/√2 = 2 + 0.5/√2, where the inner edges are the gap apart across the diagonal; open,
+    // it stops at 3: 1 − 0.5/√2 less along a leg of 17, 2 mm thick, for each of the two panels.
+    let (v, v0) = (volume(&mut s), volume(&mut plain));
+    let want = 2.0 * (1.0 - 0.5 / std::f64::consts::SQRT_2) * 17.0 * 2.0;
+    assert!((v0 - v - want).abs() < 0.05, "{v0} - {v} vs {want}");
+    // The flat pattern and the DXF agree, and differ from the mitred part.
+    let (_, drawn) = flat_and_dxf(&mut s);
+    assert!(!same_drawing(&drawn, &flat_and_dxf(&mut plain).1));
+    // Unfold, refold and reopening keep it.
+    run(&mut s, "sheet.unfold", json!({}));
+    run(&mut s, "sheet.refold", json!({}));
+    assert!((volume(&mut s) - v).abs() < 1e-6 * v);
+    let mut reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    assert!((volume(&mut reopened) - v).abs() < 1e-6 * v);
+    // Alone on the base, the two open flanges make exactly the base cut back to 117 x 87 and two
+    // bends and legs along it.
+    let corner_area = 117.0 * 87.0 + (PI + 17.0) * (117.0 + 87.0);
+    let mut lone = Session::default();
+    run(
+        &mut lone,
+        "sheet.manage_rules",
+        json!({"name": "AL2", "thickness": "2 mm", "k_factor": 0.5, "bend_radius": "1 mm", "gap": "0.5 mm", "active": true}),
+    );
+    base(&mut lone, 120.0, 90.0);
+    run(&mut lone, "sheet.flange", json!({"edges": [[60, 0, 2], [0, 45, 2]], "height": 20, "mitre": false}));
+    // Measured on the folded solid, whose bends are curved: within a few millionths.
+    assert!(rel(volume(&mut lone), corner_area * 2.0) < 1e-5, "{} vs {}", volume(&mut lone), corner_area * 2.0);
+}
+
+#[test]
+fn the_mitre_of_an_edge_flange_is_checked_before_anything_changes() {
+    let mut s = Session::default();
+    run(&mut s, "sheet.manage_rules", json!({"name": "AL2", "thickness": "2 mm", "k_factor": 0.5, "bend_radius": "1 mm", "active": true}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Base"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [120, 90]}));
+    run(&mut s, "sketch.finish", json!({}));
+    let features = s.doc.features.len();
+    // A base or a contour flange takes its corners from the rule.
+    for (params, key) in [
+        (json!({"sketch": "Base", "mitre": false}), "mitre"),
+        (json!({"sketch": "Base", "curves": ["l1"], "distance": 10, "mitre_gap": "1 mm"}), "mitre_gap"),
+    ] {
+        let e = s.execute("sheet.flange", &params).map(|_| ()).unwrap_err().to_string();
+        assert!(e.contains(&format!("`{key}` is only for edge flanges")), "{params}: {e}");
+    }
+    assert_eq!(s.doc.features.len(), features);
+    run(&mut s, "sheet.flange", json!({"sketch": "Base"}));
+    let features = s.doc.features.len();
+    let v = volume(&mut s);
+    let edge = |extra: Value| {
+        let mut p = json!({"edges": [[60, 0, 2], [0, 45, 2]], "height": 20});
+        if let (Some(p), Some(extra)) = (p.as_object_mut(), extra.as_object()) {
+            p.extend(extra.clone());
+        }
+        p
+    };
+    for (extra, want) in [
+        (json!({"mitre": "no"}), "mitre"),
+        (json!({"mitre": 0}), "mitre"),
+        (json!({"mitre_gap": "wide"}), "mitre_gap"),
+        (json!({"mitre_gap": "30 deg"}), "mitre_gap"),
+        (json!({"mitre_gap": "0 mm"}), "the mitre gap must be at least 0.01 mm"),
+        (json!({"mitre_gap": "-1 mm"}), "the mitre gap must be at least 0.01 mm"),
+        (json!({"mitre_gap": "1e9 mm"}), "the mitre gap must be at least 0.01 mm"),
+        (json!({"mitre": false, "mitre_gap": "1 mm"}), "`mitre_gap` is for mitred corners"),
+        (json!({"mitre": false, "corner_relief_shape": "round"}), "`corner_relief_shape` is for mitred corners"),
+        (json!({"mitre": false, "corner_relief": "4 mm"}), "`corner_relief` is for mitred corners"),
+    ] {
+        let e = s.execute("sheet.flange", &edge(extra.clone())).map(|_| ()).unwrap_err().to_string();
+        assert!(e.contains(want), "{extra}: {e}");
+        assert_eq!(s.doc.features.len(), features, "{extra}: a refused flange changes nothing");
+        assert!((volume(&mut s) - v).abs() < 1e-9, "{extra}");
+    }
+    // Null is not given, and `mitre: true` is the default: neither is saved.
+    run(&mut s, "sheet.flange", edge(json!({"mitre": null, "mitre_gap": null})));
+    let mut other = edge(json!({"mitre": true}));
+    other["edges"] = json!([[60, 90, 2], [120, 45, 2]]);
+    run(&mut s, "sheet.flange", other);
+    let saved: Value = serde_json::from_str(&s.doc.to_json()).unwrap_or_default();
+    let flanges: Vec<Value> = saved["features"].as_array().cloned().unwrap_or_default().into_iter().filter(|f| f["type"] == "sheet_flange").collect();
+    assert!(flanges.iter().all(|f| f.get("mitre").is_none() && f.get("mitre_gap").is_none()), "{flanges:?}");
+}
+
+#[test]
+fn the_mitre_of_an_edge_flange_is_saved_with_it_and_edited_in_the_timeline() {
+    let flange_features = |s: &Session| -> Vec<Value> {
+        let saved: Value = serde_json::from_str(&s.doc.to_json()).unwrap_or_default();
+        saved["features"].as_array().cloned().unwrap_or_default().into_iter().filter(|f| f["type"] == "sheet_flange").collect()
+    };
+    let mut s = two_flange_groups(json!({}), json!({"mitre": false}), json!({"mitre_gap": "1.5 mm"}));
+    let features = flange_features(&s);
+    assert_eq!(features.len(), 2);
+    assert_eq!((&features[0]["mitre"], features[0].get("mitre_gap")), (&json!(false), None));
+    assert_eq!((features[1].get("mitre"), &features[1]["mitre_gap"]), (None, &json!("1.5 mm")));
+    let mut reopened = Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    assert_eq!(reopened.doc.features, s.doc.features);
+    assert!((volume(&mut reopened) - volume(&mut s)).abs() < 1e-6);
+    // timeline.edit mitres the open corners again (null is the default), and takes the gap back to the rule's.
+    let mut plain = two_flange_groups(json!({}), json!({}), json!({}));
+    let ids: Vec<u64> = s.doc.features.iter().filter(|f| matches!(f.kind, solidcraft_doc::FeatureKind::SheetFlange { .. })).map(|f| f.id).collect();
+    run(&mut s, "timeline.edit", json!({"feature": ids[0], "set": {"mitre": null}}));
+    run(&mut s, "timeline.edit", json!({"feature": ids[1], "set": {"mitre_gap": null}}));
+    assert!(flange_features(&s).iter().all(|f| f.get("mitre").is_none() && f.get("mitre_gap").is_none()));
+    assert!((volume(&mut s) - volume(&mut plain)).abs() < 1e-6);
+}
+
 #[test]
 fn corners_left_open_are_reported_on_the_flange() {
     let mut s = Session::default();

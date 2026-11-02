@@ -54,6 +54,8 @@ fn schemas_and_the_key_check_agree() {
             "flip",
             "height",
             "height_from",
+            "mitre",
+            "mitre_gap",
             "position",
             "profiles",
             "radius",

@@ -1,0 +1,38 @@
+{
+  "en": {
+    "ui.flange_mitre_corners": "Mitre corners",
+    "ui.flange_mitre_gap": "Mitre Gap"
+  },
+  "ar": {
+    "ui.flange_mitre_corners": "أركان بتقاطع مائل",
+    "ui.flange_mitre_gap": "فجوة التقاطع المائل"
+  },
+  "he": {
+    "ui.flange_mitre_corners": "פינות מיטר",
+    "ui.flange_mitre_gap": "פער מיטר"
+  },
+  "vi": {
+    "ui.flange_mitre_corners": "Vát chéo các góc",
+    "ui.flange_mitre_gap": "Khe hở vát chéo"
+  },
+  "de": {
+    "ui.flange_mitre_corners": "Ecken auf Gehrung",
+    "ui.flange_mitre_gap": "Gehrungsspalt"
+  },
+  "ja": {
+    "ui.flange_mitre_corners": "角を留め継ぎ",
+    "ui.flange_mitre_gap": "留め継ぎの間隔"
+  },
+  "ko": {
+    "ui.flange_mitre_corners": "모서리 연귀",
+    "ui.flange_mitre_gap": "연귀 간격"
+  },
+  "pt-BR": {
+    "ui.flange_mitre_corners": "Cantos em meia-esquadria",
+    "ui.flange_mitre_gap": "Folga da meia-esquadria"
+  },
+  "zh": {
+    "ui.flange_mitre_corners": "斜接拐角",
+    "ui.flange_mitre_gap": "斜接间隙"
+  }
+}

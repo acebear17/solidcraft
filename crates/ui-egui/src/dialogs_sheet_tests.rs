@@ -625,6 +625,84 @@ fn flange_dialog_picks_a_corner_relief_of_its_own() {
     }
 }
 
+/// The Flange dialog's mitre: ticked (the default) with an empty gap asks for nothing; a gap of its
+/// own reaches the feature; unticked asks for open corners, hides the gap and relief rows and sends
+/// neither; Edit Feature shows each again.
+#[test]
+fn flange_dialog_mitres_with_a_gap_of_its_own_or_leaves_corners_open() {
+    for mode in [crate::shell::LayoutMode::Floating, crate::shell::LayoutMode::Docked] {
+        let mut h = crate::scenario::Harness::new();
+        h.call("ui.set", json!({"layout":mode}));
+        h.app
+            .run(
+                "sheet.manage_rules",
+                json!({"name": "AL2", "thickness": "2 mm", "k_factor": 0.5, "bend_radius": "1 mm", "gap": "0.5 mm", "active": true}),
+            )
+            .unwrap();
+        h.app.run("sketch.create", json!({"plane": "XY", "name": "Base"})).unwrap();
+        h.app.run("sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [120, 90]})).unwrap();
+        h.app.run("sketch.finish", json!({})).unwrap();
+        h.app.run("sheet.flange", json!({"sketch": "Base"})).unwrap();
+        let edges: Vec<Sel> =
+            [[60.0, 0.0, 2.0], [0.0, 45.0, 2.0]].iter().filter_map(|p| edge_sel(&h.app.session, Vec3::new(p[0], p[1], p[2]))).collect();
+        assert_eq!(edges.len(), 2);
+        h.app.session.selection = edges.clone();
+        h.app.start("sheet.flange");
+        h.frames(3);
+        let shown = |app: &SolveApp| match app.dialog.as_ref().map(|d| &d.kind) {
+            Some(Kind::Sheet(Sm::Flange { mitre, mitre_gap, .. })) => Some((*mitre, mitre_gap.clone())),
+            _ => None,
+        };
+        let saved = |app: &SolveApp| match &app.session.doc.features.last().map(|f| &f.kind) {
+            Some(FeatureKind::SheetFlange { mitre, mitre_gap, .. }) => Some((*mitre, mitre_gap.clone())),
+            _ => None,
+        };
+        // Untouched: mitred with the rule's gap, and the command is given neither key.
+        assert_eq!(shown(&h.app), Some((true, String::new())));
+        let d = h.app.dialog.clone().unwrap();
+        let c = apply_commands(&h.app, &d).unwrap();
+        assert!(c[0].1.get("mitre").is_none() && c[0].1.get("mitre_gap").is_none(), "{}", c[0].1);
+        // A gap of its own in the Advanced group.
+        h.step(&json!({"click": {"handle": "dialog:section:Advanced"}})).unwrap();
+        h.frames(2);
+        if let Some(Kind::Sheet(Sm::Flange { mitre_gap, .. })) = h.app.dialog.as_mut().map(|d| &mut d.kind) {
+            *mitre_gap = "2 mm".into();
+        }
+        let d = h.app.dialog.clone().unwrap();
+        let c = apply_commands(&h.app, &d).unwrap();
+        assert_eq!(c[0].1["mitre_gap"], json!("2 mm"));
+        h.step(&json!({"widget": "OK"})).unwrap();
+        assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog);
+        assert_eq!(saved(&h.app), Some((None, Some("2 mm".into()))));
+        assert!(h.app.session.model.results.iter().all(|r| r.error.is_none() && r.warning.is_none()), "{:?}", h.app.session.model.results);
+        let id = h.app.session.doc.features.last().map(|f| f.id).unwrap();
+        let e = edit_dialog(&h.app, id, None).unwrap();
+        assert!(matches!(&e.kind, Kind::Sheet(Sm::Flange { mitre: true, mitre_gap, .. }) if mitre_gap == "2 mm"));
+        h.app.run("edit.undo", json!({})).unwrap();
+        // Unticked: open corners. A gap or a relief left in the hidden rows is not sent.
+        h.app.session.selection = edges.clone();
+        h.app.start("sheet.flange");
+        h.frames(3);
+        h.step(&json!({"click": {"handle": "dialog:ui.flange_mitre_corners"}})).unwrap();
+        h.frames(2);
+        assert_eq!(shown(&h.app).map(|s| s.0), Some(false));
+        if let Some(Kind::Sheet(Sm::Flange { mitre_gap, relief, .. })) = h.app.dialog.as_mut().map(|d| &mut d.kind) {
+            *mitre_gap = "2 mm".into();
+            *relief = 2;
+        }
+        let d = h.app.dialog.clone().unwrap();
+        let c = apply_commands(&h.app, &d).unwrap();
+        assert_eq!(c[0].1["mitre"], json!(false));
+        assert!(c[0].1.get("mitre_gap").is_none() && c[0].1.get("corner_relief_shape").is_none(), "{}", c[0].1);
+        h.step(&json!({"widget": "OK"})).unwrap();
+        assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog);
+        assert_eq!(saved(&h.app), Some((Some(false), None)));
+        let id = h.app.session.doc.features.last().map(|f| f.id).unwrap();
+        let e = edit_dialog(&h.app, id, None).unwrap();
+        assert!(matches!(&e.kind, Kind::Sheet(Sm::Flange { mitre: false, .. })));
+    }
+}
+
 #[test]
 fn pocket_depth_labels_follow_inches_without_changing_flat_data() {
     for mode in [crate::shell::LayoutMode::Floating, crate::shell::LayoutMode::Docked] {

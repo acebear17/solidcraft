@@ -425,13 +425,18 @@ impl AngleDisplay {
     }
 }
 
-/// The corner relief an edge flange feature asks for in place of the rule's. A value left out
-/// follows the rule.
+/// The corners an edge flange feature asks for in place of the rule's: their relief and the gap
+/// they are mitred with. A value left out follows the rule.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ReliefOverride {
     pub shape: Option<ReliefShape>,
     /// How far across the relief is (mm).
     pub size: Option<f64>,
+    /// The gap the feature's corners are mitred with (mm), in place of the rule's `gap`.
+    pub gap: Option<f64>,
+    /// The feature's flanges are not mitred toward each other: each corner stays as its bends
+    /// leave it, as between flanges of separate features, and gets no corner relief.
+    pub open: bool,
 }
 
 /// A rule's values (mm, unit-less K).
@@ -2555,6 +2560,11 @@ impl SheetBody {
         if edges.is_empty() || edges.len() > 1000 {
             return Err(DocError::Invalid("pick 1…1000 edges".into()));
         }
+        if let Some(gap) = relief.gap
+            && !(MIN_CORNER_GAP..1e4).contains(&gap)
+        {
+            return Err(DocError::Invalid(format!("the mitre gap must be at least {MIN_CORNER_GAP} mm, got {gap:.4} mm")));
+        }
         // With several edges a message says which one it is about.
         let on = |k: usize| if edges.len() > 1 { format!("edge {}: ", k + 1) } else { String::new() };
         // Each edge's setback and leg (the panel past the bend) follow its own angle and height.
@@ -2729,9 +2739,24 @@ impl SheetBody {
         for (&i, &free) in made.iter().zip(&freed) {
             notes.extend(self.relieve_bend_ends(i, free));
         }
-        notes.extend(self.close_corners(&made, relief));
-        notes.extend(self.close_return_corners(&made));
-        notes.extend(self.close_side_corners(&made, relief));
+        if relief.open {
+            // Each flange on its own, as if it were a feature of its own: no two of them are
+            // mitred toward each other, and a lone return is still kept clear of its neighbour.
+            for &i in &made {
+                notes.extend(self.close_return_corners(&[i]));
+            }
+        } else {
+            // The feature's own gap, if it has one, only while its corners are closed: the body
+            // keeps the rule's for everything after.
+            let rule_gap = self.gap;
+            if let Some(gap) = relief.gap {
+                self.gap = gap;
+            }
+            notes.extend(self.close_corners(&made, relief));
+            notes.extend(self.close_return_corners(&made));
+            notes.extend(self.close_side_corners(&made, relief));
+            self.gap = rule_gap;
+        }
         Ok((made, notes))
     }
 
@@ -5710,6 +5735,72 @@ mod tests {
         }
     }
 
+    /// A 120 x 90 tray as [`tray`], its four flanges made with `own` in place of the rule's corners.
+    fn tray_with(rv: &RuleValues, deg: f64, height: f64, own: ReliefOverride) -> (SheetBody, Vec<usize>, Vec<String>) {
+        let r = rect(Vec2::new(0.0, 0.0), Vec2::new(120.0, 0.0), Vec2::new(120.0, 90.0), Vec2::new(0.0, 90.0));
+        let mut s = base_flange("Body1", "AL2", rv, Plane::XY, r);
+        let t = rv.thickness;
+        let picks = [Vec3::new(60.0, 0.0, t), Vec3::new(120.0, 45.0, t), Vec3::new(60.0, 90.0, t), Vec3::new(0.0, 45.0, t)];
+        let each: Vec<EdgeFlange> = picks.iter().map(|&pick| EdgeFlange { pick, height, angle: deg.to_radians(), from: HeightFrom::Outer }).collect();
+        let (made, notes) = s.add_flanges_each(&each, rv.bend_radius, "inside", false, own).unwrap();
+        (s, made, notes)
+    }
+
+    #[test]
+    fn a_feature_mitres_its_corners_with_its_own_gap_and_the_body_keeps_the_rules() {
+        for deg in [90.0f64, 72.0] {
+            let own = ReliefOverride { gap: Some(2.0), ..ReliefOverride::default() };
+            let (s, made, notes) = tray_with(&alu(), deg, 38.6, own);
+            assert!(notes.is_empty(), "{deg}°: {notes:?}");
+            let corners = s.corners(&made);
+            assert_eq!(corners.len(), 4);
+            ends_are_gap_apart(&s, &corners, 2.0, &format!("{deg}° with a gap of its own"));
+            assert_eq!(s.gap, alu().gap, "the body keeps the rule's gap");
+            // The same part as under a rule of that gap.
+            let (by_rule, _) = tray(&RuleValues { gap: 2.0, ..alu() }, deg, 38.6);
+            assert_eq!(s.flanges, by_rule.flanges, "{deg}°");
+            assert!((flat_area(&s) - flat_area(&by_rule)).abs() < 1e-9);
+            let b = s.solid().unwrap();
+            assert!(b.validity().is_empty() && b.shell_count() == 1, "{deg}°: {:?}", b.validity());
+            assert!((vol(&b) - flat_area(&s) * 2.0).abs() < 1e-3 * vol(&b));
+        }
+        // A gap that would make the ends touch is refused before anything changes.
+        let r = rect(Vec2::new(0.0, 0.0), Vec2::new(120.0, 0.0), Vec2::new(120.0, 90.0), Vec2::new(0.0, 90.0));
+        let mut s = base_flange("Body1", "AL2", &alu(), Plane::XY, r);
+        let before = s.clone();
+        let each = [EdgeFlange { pick: Vec3::new(60.0, 0.0, 2.0), height: 20.0, angle: 1.0, from: HeightFrom::Outer }];
+        for gap in [0.0, 0.001, -1.0, f64::NAN, f64::INFINITY, 1e9] {
+            let own = ReliefOverride { gap: Some(gap), ..ReliefOverride::default() };
+            let e = s.add_flanges_each(&each, 1.0, "inside", false, own).unwrap_err().to_string();
+            assert!(e.contains("the mitre gap must be at least 0.01 mm"), "{gap}: {e}");
+            assert_eq!(s, before, "{gap}");
+        }
+    }
+
+    #[test]
+    fn a_feature_can_leave_its_corners_open() {
+        // Under a round corner relief, too: open corners are not relieved.
+        let rv = RuleValues { corner_relief_shape: ReliefShape::Round, ..alu() };
+        for deg in [90.0f64, 72.0] {
+            let (s, made, notes) = tray_with(&rv, deg, 38.6, ReliefOverride { open: true, ..ReliefOverride::default() });
+            assert!(notes.is_empty(), "{deg}°: {notes:?}");
+            assert_eq!(made.len(), 4);
+            // Each flange ends square where its bend ends, as flanges of separate features do.
+            assert!(s.flanges.iter().all(|f| f.ext == (0.0, 0.0) && f.slope == (0.0, 0.0) && f.tear == (false, false)), "{deg}°");
+            assert!(s.holes.is_empty(), "{deg}°: no corner relief");
+            let s0 = (1.0 + 2.0) * (deg.to_radians() / 2.0).tan();
+            assert!((s.flanges[0].len - (120.0 - 2.0 * s0)).abs() < 1e-9 && (s.flanges[1].len - (90.0 - 2.0 * s0)).abs() < 1e-9);
+            let regions = s.flat_regions().unwrap();
+            assert_eq!(regions.len(), 1);
+            let b = s.solid().unwrap();
+            assert!(b.validity().is_empty() && b.shell_count() == 1, "{deg}°: {:?}", b.validity());
+            assert!((vol(&b) - flat_area(&s) * 2.0).abs() < 1e-3 * vol(&b));
+            // Mitred, the same tray holds more material: its panels run on toward each other.
+            let (mitred, _) = tray(&rv, deg, 38.6);
+            assert!(flat_area(&mitred) > flat_area(&s), "{deg}°");
+        }
+    }
+
     #[test]
     fn a_flange_of_a_later_feature_leaves_the_corner_as_it_was() {
         // The convention of reference case 75-sm-bracket-holes: the earlier flange keeps its length
@@ -6425,7 +6516,9 @@ mod tests {
             let point = parent.p + parent.d * parent.len + parent.n * (s.allowance(parent) + parent.leg * 0.5);
             let side = apply_point(&s.world(Some(wall)), Vec3::new(point.x, point.y, s.t));
             let edges = [Vec3::new(120.0, 45.0, 2.0), side].map(|pick| EdgeFlange { pick, height: 20.0, angle, from: HeightFrom::Outer });
-            let (_, notes) = s.add_flanges_each(&edges, 1.0, "inside", false, ReliefOverride { shape: Some(shape), size: Some(4.0) }).unwrap();
+            let (_, notes) = s
+                .add_flanges_each(&edges, 1.0, "inside", false, ReliefOverride { shape: Some(shape), size: Some(4.0), ..ReliefOverride::default() })
+                .unwrap();
             assert!(notes.is_empty(), "{shape:?}: {notes:?}");
             assert_eq!(s.holes.len(), 1);
             assert!(!s.flat_regions().unwrap().iter().any(|region| region.contains(Vec2::new(116.0, 1.5))));

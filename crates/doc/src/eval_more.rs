@@ -583,7 +583,20 @@ pub(super) fn sheet_eval(
             st.sheets.push(sh);
             Ok(())
         }
-        FeatureKind::SheetFlange { edges, height, angle, radius, position, flip, body, corner_relief_shape, corner_relief, height_from } => {
+        FeatureKind::SheetFlange {
+            edges,
+            height,
+            angle,
+            radius,
+            position,
+            flip,
+            body,
+            corner_relief_shape,
+            corner_relief,
+            height_from,
+            mitre,
+            mitre_gap,
+        } => {
             let i = sheet_for(st, body, edges.first().map(|e| e.point.0))?;
             let (h, a) = (val(vals, height, Kind::Length)?, val(vals, angle, Kind::Angle)?);
             // Each edge's own height and angle, else the feature's.
@@ -606,7 +619,7 @@ pub(super) fn sheet_eval(
                     doc.rule_values(vals, &doc.sheet_rule(Some(&rule)))?.bend_radius
                 }
             };
-            // The corner relief these flanges ask for in place of the rule's.
+            // The corners these flanges ask for in place of the rule's: relief, mitre gap, or none.
             let relief = sheet::ReliefOverride {
                 shape: match corner_relief_shape {
                     Some(name) => Some(
@@ -619,6 +632,11 @@ pub(super) fn sheet_eval(
                     Some(e) => Some(val(vals, e, Kind::Length)?),
                     None => None,
                 },
+                gap: match mitre_gap {
+                    Some(e) => Some(val(vals, e, Kind::Length)?),
+                    None => None,
+                },
+                open: *mitre == Some(false),
             };
             let from = match height_from {
                 Some(name) => sheet::HeightFrom::parse(name)

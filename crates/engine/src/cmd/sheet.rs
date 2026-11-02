@@ -40,10 +40,12 @@ pub static COMMANDS: &[CommandSpec] = &[
          the bend starting at the edge (bend_outside is the same), half way, the inner virtual sharp on the edge, \
          or the bend's outer face tangent to the edge's face (below 90 deg the bend's end on that face)), flip?, body?, corner_relief_shape?: notch|round|rectangular|tear and corner_relief? (size across): \
          the relief at the corners these flanges make (default: the rule's); \
+         mitre? (default true: the corners between these flanges are closed; false leaves them open, as between separate features, \
+         and refuses mitre_gap and the corner relief), mitre_gap? (the gap the corners are closed with; default: the rule's gap); \
          then?: [{angle?, height, flip?}] further bends (at most 16), each a flange on the far edge of the one before, flip: true turns that bend the other way (edge only); \
          type?: base|edge|contour (default from the inputs); name?, body_name? (the new body). \
          Thickness, K-factor and bend radius come from the rule (sheet.manage_rules); passing them here is refused, \
-         and so is the corner relief on a base or contour flange",
+         and so are the corner relief and the mitre on a base or contour flange",
     ),
     CommandSpec::new("sheet.path_flange", "Path Flange", path_flange).at("SHEET METAL", "CREATE").icon("path_flange").params(
         "edge: [x,y,z] on a top or bottom edge of the sheet; sketch + curves: an open chain of sketch lines drawn on a plane across \
@@ -300,6 +302,11 @@ fn flange(s: &mut Session, p: &Value) -> Result<Value> {
     if ty != "edge" && p.get("then").is_some_and(|v| !v.is_null()) {
         return Err(bad(cmd, "`then` (further bends) is only for edge flanges"));
     }
+    if ty != "edge"
+        && let Some(key) = ["mitre", "mitre_gap"].iter().find(|k| p.get(**k).is_some_and(|v| !v.is_null()))
+    {
+        return Err(bad(cmd, format!("`{key}` is only for edge flanges: a base or contour flange takes its corners from the rule")));
+    }
     match flange_type(&ty).map_err(|why| bad(cmd, why))? {
         FlangeType::Base => {
             let sketch = feature_sketch(s, p, cmd)?;
@@ -369,6 +376,21 @@ fn flange(s: &mut Session, p: &Value) -> Result<Value> {
             if let Some(c) = &corner_relief {
                 check_expr(s, c, Kind::Length, cmd, "corner_relief")?;
             }
+            // How these flanges' corners are mitred: with the feature's own gap in place of the
+            // rule's, or not at all (`mitre: false`, saved; true is the default and saves nothing).
+            let mitre = match p.get("mitre").filter(|v| !v.is_null()) {
+                Some(v) => v.as_bool().ok_or_else(|| bad(cmd, "`mitre` must be true or false"))?,
+                None => true,
+            };
+            let mitre_gap = expr(p, "mitre_gap");
+            if let Some(g) = &mitre_gap {
+                check_expr(s, g, Kind::Length, cmd, "mitre_gap")?;
+            }
+            if !mitre
+                && let Some(key) = ["mitre_gap", "corner_relief_shape", "corner_relief"].iter().find(|k| p.get(**k).is_some_and(|v| !v.is_null()))
+            {
+                return Err(bad(cmd, format!("`{key}` is for mitred corners; leave it out with `mitre: false`")));
+            }
             let flip = bool_(p, "flip").unwrap_or(false);
             let mut made = add_feature(
                 s,
@@ -384,6 +406,8 @@ fn flange(s: &mut Session, p: &Value) -> Result<Value> {
                     corner_relief_shape,
                     corner_relief,
                     height_from: height_from.clone(),
+                    mitre: (!mitre).then_some(false),
+                    mitre_gap,
                 },
             )?;
             // Each further bend stands on the far edge of the flange before it.
@@ -404,6 +428,8 @@ fn flange(s: &mut Session, p: &Value) -> Result<Value> {
                         corner_relief_shape: None,
                         corner_relief: None,
                         height_from: height_from.clone(),
+                        mitre: None,
+                        mitre_gap: None,
                     },
                 )?;
             }
