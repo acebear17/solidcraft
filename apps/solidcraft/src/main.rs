@@ -1314,6 +1314,35 @@ fn http_download(url: &str, to: &std::path::Path, progress: &dyn Fn(u64, Option<
 /// HTTPS GET for Workshop links (docs/workshop-links.md): workshop.solidcraft.io only, no
 /// redirects, certificates from the operating system, a 30 s limit, at most 32 MB, and the
 /// response's signature headers, which the index is checked against.
+/// The proxy every request to another computer goes through: the organization's `ProxyServer`
+/// policy when it gives one (docs/book/src/guide/managed-deployment.md), otherwise
+/// `HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` as before. Read once. With the policy, this computer
+/// itself (a local model server, the tests' servers) is still reached directly.
+fn proxy() -> Option<ureq::Proxy> {
+    static PROXY: std::sync::OnceLock<Option<ureq::Proxy>> = std::sync::OnceLock::new();
+    PROXY
+        .get_or_init(|| {
+            let policy = solidcraft_ui_egui::policy::load();
+            let Some(server) = policy.proxy_server() else { return ureq::Proxy::try_from_env() };
+            let built = ureq::Proxy::builder(ureq::ProxyProtocol::Http)
+                .host(&server.host)
+                .port(server.port)
+                .no_proxy("localhost")
+                .no_proxy("127.")
+                .no_proxy("::1")
+                .no_proxy("[::1]")
+                .build();
+            match built {
+                Ok(proxy) => Some(proxy),
+                Err(e) => {
+                    log::warn!("policy: ProxyServer {}:{} can't be used ({e}); the environment's proxy settings apply", server.host, server.port);
+                    ureq::Proxy::try_from_env()
+                }
+            }
+        })
+        .clone()
+}
+
 fn workshop_get(url: &str) -> Result<solidcraft_ui_egui::workshop::Signed, String> {
     use std::time::Duration;
     let host = solidcraft_ui_egui::workshop::index::HOST;
@@ -1326,6 +1355,7 @@ fn workshop_get(url: &str) -> Result<solidcraft_ui_egui::workshop::Signed, Strin
         .build();
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .tls_config(tls)
+        .proxy(proxy())
         .https_only(true)
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(30)))
@@ -1356,6 +1386,7 @@ fn agent_http(r: &solidcraft_ui_egui::agent_chat::backend::HttpRequest) -> Resul
         .build();
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .tls_config(tls)
+        .proxy(proxy())
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(r.timeout_s.clamp(1, 3600))))
         .timeout_connect(Some(Duration::from_secs(10)))
@@ -1444,6 +1475,7 @@ fn tickets_call(r: &solidcraft_ui_egui::agent_chat::backend::HttpRequest) -> Res
         .build();
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .tls_config(tls)
+        .proxy(proxy())
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(r.timeout_s.clamp(1, 3600))))
         .timeout_connect(Some(Duration::from_secs(10)))
@@ -1508,6 +1540,7 @@ fn http_call(url: &str, timeout: std::time::Duration) -> Result<ureq::http::Resp
         .build();
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .tls_config(tls)
+        .proxy(proxy())
         .https_only(true)
         .http_status_as_error(false)
         .timeout_global(Some(timeout))

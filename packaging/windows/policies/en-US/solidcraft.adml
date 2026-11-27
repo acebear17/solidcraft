@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<policyDefinitionResources xmlns="http://www.microsoft.com/GroupPolicy/PolicyDefinitions" revision="1.7" schemaVersion="1.0">
+<policyDefinitionResources xmlns="http://www.microsoft.com/GroupPolicy/PolicyDefinitions" revision="1.8" schemaVersion="1.0">
   <displayName>SolidCraft</displayName>
   <description>Settings an organization sets for the people who use SolidCraft on its computers.</description>
   <resources>
@@ -322,6 +322,14 @@ In the export dialog the setting shows as set by the organization. The person's 
       <string id="Theme_solarized-light">Solarized Light</string>
       <string id="Theme_solidcraft-95">SolidCraft 95</string>
       <string id="Theme_tokyo-night">Tokyo Night</string>
+      <string id="ProxyServer">Proxy server</string>
+      <string id="ProxyServer_Explain">The HTTP proxy SolidCraft connects through for every request to another computer: update checks and downloads, the Workshop, problem reports, usage statistics, EasyPrint and AI agents set up in the chat.
+
+Enabled: give the proxy as host:port or http://host:port, for example proxy.example.com:3128 or 10.0.0.5:8080. SolidCraft sends every request to another computer through it, in place of the HTTPS_PROXY and ALL_PROXY environment variables. Connections to this computer itself (localhost) stay direct. A value with a user name or password, a path, another scheme such as socks5:// or https://, or no port is ignored, and SolidCraft writes a warning to its log.
+
+Disabled or Not configured: SolidCraft uses the HTTPS_PROXY, ALL_PROXY and NO_PROXY environment variables when they are set, and otherwise connects directly.
+
+The change applies the next time SolidCraft starts.</string>
     </stringTable>
     <presentationTable>
       <presentation id="CheckForUpdates" />
@@ -388,6 +396,11 @@ In the export dialog the setting shows as set by the organization. The person's 
       <presentation id="DxfTolerance">
         <textBox refId="DxfTolerance">
           <label>Tolerance in mm (0.001 to 1):</label>
+        </textBox>
+      </presentation>
+      <presentation id="ProxyServer">
+        <textBox refId="ProxyServer">
+          <label>Proxy server (host:port):</label>
         </textBox>
       </presentation>
     </presentationTable>

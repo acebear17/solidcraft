@@ -151,6 +151,21 @@ pub const ORGANIZATION_NAME: &str = "OrganizationName";
 /// The longest organization name shown, in characters; a longer one is cut.
 pub const MAX_NAME: usize = 64;
 
+/// The HTTP proxy every request SolidCraft makes to another computer goes through, in place of
+/// the `HTTPS_PROXY`/`ALL_PROXY` variables: a `REG_SZ` `host:port` or `http://host:port`.
+/// Mandatory only; it locks nothing.
+pub const PROXY_SERVER: &str = "ProxyServer";
+
+/// The longest [`PROXY_SERVER`] read, in bytes; a longer one is not set.
+pub const MAX_PROXY_SERVER: usize = 300;
+
+/// A [`PROXY_SERVER`] value: a host name or IP address (an IPv6 one in brackets) and a port.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProxyServer {
+    pub host: String,
+    pub port: u16,
+}
+
 /// The macOS preference domain of the managed values: the app's bundle identifier.
 pub const MACOS_DOMAIN: &str = "io.tangencylabs.solidcraft";
 
@@ -190,6 +205,8 @@ pub struct Layer {
     /// [`ORGANIZATION_NAME`], cleaned: one line, no control or direction characters, at most
     /// [`MAX_NAME`] characters, never empty.
     pub organization: Option<String>,
+    /// [`PROXY_SERVER`]: an HTTP proxy's host and port.
+    pub proxy_server: Option<ProxyServer>,
 }
 
 impl Layer {
@@ -239,7 +256,15 @@ impl Layer {
                 on
             }
         };
-        Layer { settings, allowed, usage_statistics, organization: text(ORGANIZATION_NAME) }
+        let proxy_server = get(PROXY_SERVER).and_then(|value| {
+            let proxy = proxy_server(&value);
+            if proxy.is_none() {
+                // The value can hold a user name and password: it is not logged.
+                log::warn!("policy: {PROXY_SERVER} is not an HTTP proxy's host:port; ignored");
+            }
+            proxy
+        });
+        Layer { settings, allowed, usage_statistics, organization: text(ORGANIZATION_NAME), proxy_server }
     }
 
     /// [`CHECK_FOR_UPDATES`]: whether update checks run.
@@ -252,7 +277,11 @@ impl Layer {
 
     /// Whether any value is set.
     fn any(&self) -> bool {
-        !self.settings.is_empty() || !self.allowed.is_empty() || self.usage_statistics.is_some() || self.organization.is_some()
+        !self.settings.is_empty()
+            || !self.allowed.is_empty()
+            || self.usage_statistics.is_some()
+            || self.organization.is_some()
+            || self.proxy_server.is_some()
     }
 
     /// `self`, with `under` for the values `self` leaves unset.
@@ -268,6 +297,7 @@ impl Layer {
             allowed: self.allowed,
             usage_statistics: self.usage_statistics.or(under.usage_statistics),
             organization: self.organization.or(under.organization),
+            proxy_server: self.proxy_server.or(under.proxy_server),
         }
     }
 }
@@ -315,6 +345,47 @@ fn parse(kind: Kind, value: &Value) -> Option<Setting> {
         (Kind::ThemeFile, Value::Text(text)) => crate::theme_files::follow_path(text).ok().filter(|path| !path.is_empty()).map(Setting::Text),
         _ => None,
     }
+}
+
+/// `value` as a [`PROXY_SERVER`]: `host:port`, optionally after `http://` and before one `/`.
+/// None for anything else: another scheme (SOCKS and HTTPS proxies are not supported), a user
+/// name or password, a path, no port or port 0, or a host that is not a name or IP address.
+fn proxy_server(value: &Value) -> Option<ProxyServer> {
+    let Value::Text(text) = value else { return None };
+    let text = text.trim();
+    if text.len() > MAX_PROXY_SERVER {
+        return None;
+    }
+    let rest = match text.split_once("://") {
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("http") => rest,
+        Some(_) => return None,
+        None => text,
+    };
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    let (host, port) = match rest.strip_prefix('[') {
+        Some(bracketed) => {
+            let (address, port) = bracketed.split_once("]:")?;
+            address.parse::<std::net::Ipv6Addr>().ok()?;
+            (format!("[{address}]"), port)
+        }
+        None => {
+            let (host, port) = rest.split_once(':')?;
+            let label = |l: &str| {
+                !l.is_empty()
+                    && l.len() <= 63
+                    && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    && !l.starts_with('-')
+                    && !l.ends_with('-')
+            };
+            (host.len() <= 253 && host.split('.').all(label)).then_some(())?;
+            (host.to_ascii_lowercase(), port)
+        }
+    };
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let port = port.parse::<u16>().ok().filter(|port| *port != 0)?;
+    Some(ProxyServer { host, port })
 }
 
 /// The preference `pref` of `p` (None: not one of [`LOCKS`]).
@@ -429,6 +500,11 @@ impl Policy {
     /// The administrator set a mandatory value: SolidCraft says it is managed.
     pub fn managed(&self) -> bool {
         self.mandatory.any()
+    }
+
+    /// The HTTP proxy the administrator gave, if any.
+    pub fn proxy_server(&self) -> Option<&ProxyServer> {
+        self.mandatory.proxy_server.as_ref()
     }
 
     /// The organization's name, when the administrator gave one.
@@ -1454,8 +1530,11 @@ mod tests {
     fn the_templates_offer_every_policy_the_app_reads() {
         let admx = include_str!("../../../packaging/windows/policies/solidcraft.admx");
         let adml = include_str!("../../../packaging/windows/policies/en-US/solidcraft.adml");
-        for name in LOCKS.iter().map(|lock| lock.policy).chain(ALLOWS.iter().map(|(policy, _)| *policy)).chain([ORGANIZATION_NAME, USAGE_STATISTICS])
-        {
+        for name in LOCKS.iter().map(|lock| lock.policy).chain(ALLOWS.iter().map(|(policy, _)| *policy)).chain([
+            ORGANIZATION_NAME,
+            PROXY_SERVER,
+            USAGE_STATISTICS,
+        ]) {
             assert!(admx.contains(&format!(r#"valueName="{name}""#)), "{name} is missing from solidcraft.admx");
             assert!(adml.contains(&format!(r#"<string id="{name}">"#)), "{name} is missing from solidcraft.adml");
         }
@@ -1474,6 +1553,65 @@ mod tests {
         for id in ["dark", "light"].into_iter().chain(crate::theme_files::builtin().iter().map(|t| t.id.as_str())) {
             assert!(admx.contains(&format!("<string>{id}</string>")), "Theme offers no {id}");
         }
+    }
+
+    #[test]
+    fn a_proxy_server_is_an_http_host_and_port_and_anything_else_is_not_set() {
+        let proxy = |v: &str| layer(&[(PROXY_SERVER, Value::Text(v.into()))]).proxy_server;
+        let at = |host: &str, port: u16| Some(ProxyServer { host: host.into(), port });
+        assert_eq!(proxy("proxy.acme.example:3128"), at("proxy.acme.example", 3128));
+        assert_eq!(proxy(" http://Proxy.ACME.example:8080/ "), at("proxy.acme.example", 8080));
+        assert_eq!(proxy("HTTP://10.0.0.5:80"), at("10.0.0.5", 80));
+        assert_eq!(proxy("[fd00::5]:3128"), at("[fd00::5]", 3128));
+        assert_eq!(proxy("http://[::1]:65535"), at("[::1]", 65535));
+        let long = format!("{}.example:80", "a".repeat(250));
+        let label = format!("{}.example:80", "a".repeat(64));
+        for hostile in [
+            "",
+            "   ",
+            "proxy.acme.example",
+            "proxy.acme.example:",
+            "proxy.acme.example:0",
+            "proxy.acme.example:65536",
+            "proxy.acme.example:+80",
+            "proxy.acme.example:80:81",
+            "https://proxy.acme.example:443",
+            "socks5://proxy.acme.example:1080",
+            "socks://proxy.acme.example:1080",
+            "http://user:secret@proxy.acme.example:3128",
+            "http://proxy.acme.example:3128/path",
+            "http://proxy.acme.example:3128?x=1",
+            "http://proxy.acme.example:3128#x",
+            "proxy acme.example:3128",
+            "proxy.acme.example:3128\nHost: other",
+            "proxy.acme.example\0:3128",
+            "-proxy.acme.example:3128",
+            "proxy..acme.example:3128",
+            ":3128",
+            "[fd00::5:3128",
+            "[not-ipv6]:3128",
+            "fd00::5:3128",
+            long.as_str(),
+            label.as_str(),
+        ] {
+            assert_eq!(proxy(hostile), None, "{hostile:?}");
+        }
+        assert_eq!(layer(&[(PROXY_SERVER, Value::Number(3128))]).proxy_server, None);
+        assert_eq!(proxy(&"a".repeat(MAX_PROXY_SERVER + 1)), None);
+
+        // A proxy alone makes the computer managed and locks nothing.
+        let managed = Policy::from_json(r#"{"ProxyServer": "proxy.acme.example:3128"}"#);
+        assert_eq!(managed.proxy_server(), at("proxy.acme.example", 3128).as_ref());
+        assert!(managed.managed());
+        assert_eq!(managed.locked(), Vec::<&str>::new());
+        // There is no person's setting to recommend: a Recommended value is ignored.
+        let recommended = Policy::from_json(r#"{"Recommended": {"ProxyServer": "proxy.acme.example:3128"}}"#);
+        assert_eq!(recommended.proxy_server(), None);
+        // A higher layer wins over a lower one.
+        let high = layer(&[(PROXY_SERVER, Value::Text("high.acme.example:1".into()))]);
+        let low = layer(&[(PROXY_SERVER, Value::Text("low.acme.example:2".into()))]);
+        assert_eq!(high.or(low.clone()).proxy_server, at("high.acme.example", 1));
+        assert_eq!(Layer::default().or(low).proxy_server, at("low.acme.example", 2));
     }
 
     #[test]

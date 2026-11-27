@@ -23,6 +23,7 @@ can run it. People without administrator rights can install it just for themselv
 |---|---|---|---|
 | Check for updates | `CheckForUpdates` | `REG_DWORD` | `1`: checks at start and once a day, and people cannot turn them off. `0`: no checks at all, as with `SOLIDCRAFT_UPDATE_CHECK=0` ([Updates and privacy](updates.md)). |
 | Anonymous usage statistics | `UsageStatistics` | `REG_DWORD` | `0`: SolidCraft sends no usage statistics, keeps none to send later and shows no notice about them, and people cannot turn them on. `1`: each person chooses. SolidCraft 0.46 or later; what is sent is in [Privacy](https://github.com/tangency-labs/solidcraft/blob/main/docs/privacy.md). |
+| Proxy server | `ProxyServer` | `REG_SZ` | `host:port` or `http://host:port`, such as `proxy.example.com:3128`: the HTTP proxy every request to another computer goes through (update checks and downloads, the Workshop, problem reports, usage statistics, EasyPrint and AI agents set up in the chat), in place of `HTTPS_PROXY` and `ALL_PROXY`. Requests to the computer itself (`localhost`) stay direct. A value with a user name or password, a path, another scheme (`https://`, `socks5://`) or no port is ignored, with a warning in the log. Not set: the environment variables apply. SolidCraft 0.51 or later. |
 | Organization name | `OrganizationName` | `REG_SZ` | The name shown as **Managed by** and the name, up to 64 characters on one line. It changes no setting. |
 | Units of new designs | `DefaultUnits` | `REG_SZ` | `mm`, `cm`, `m`, `in` or `ft` (Preferences, Design). Designs that already exist keep their units. SolidCraft 0.46 or later. |
 | Interface font | `InterfaceFont` | `REG_SZ` | the name of a font family installed on the computer, such as `Segoe UI`: the interface font, which people cannot change or replace with a font file; a family the computer does not have leaves the built-in font showing, and a file path counts as not configured. SolidCraft 0.51 or later. |
@@ -133,6 +134,8 @@ organization, and the policy that turns each off:
 | What a person asks an AI agent, and what the agent sees | The AI provider the agent uses | `AiFeatures` = `0`, `AgentControl` = `0`, `ConnectAiApps` = `0` |
 | Problem reports, with what the person ticks | SolidCraft's ticket server, or GitHub | `AllowProblemReports` = `0` |
 | A model sent to Open with EasyPrint | Printables | `AllowEasyPrint` = `0` |
+
+Where everything above must pass through the organization's proxy, set `ProxyServer`.
 
 Linked designs and fonts on network locations are read from your own file servers
 (Preferences, General, Network locations).
