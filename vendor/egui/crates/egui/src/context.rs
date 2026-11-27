@@ -654,24 +654,29 @@ impl ContextImpl {
 
         let builders = &mut state.nodes;
 
-        if let std::collections::hash_map::Entry::Vacant(entry) = builders.entry(id) {
-            entry.insert(Default::default());
-
+        if !builders.contains_key(&id) {
             /// Find the first ancestor that already has an accesskit node.
+            ///
+            /// SolidCraft (#14364): walked before the node is added, and at most once round the
+            /// parent map, so a widget registered as its own ancestor is not made its own child
+            /// (a node the root never reaches) and a loop of parents ends.
             fn find_accesskit_parent(
                 parent_map: &IdMap<Id>,
                 node_map: &IdMap<accesskit::Node>,
                 id: Id,
             ) -> Option<Id> {
-                if let Some(parent_id) = parent_map.get(&id) {
-                    if node_map.contains_key(parent_id) {
-                        Some(*parent_id)
-                    } else {
-                        find_accesskit_parent(parent_map, node_map, *parent_id)
+                let mut current = id;
+                for _ in 0..parent_map.len() {
+                    let parent_id = *parent_map.get(&current)?;
+                    if parent_id == id {
+                        return None;
                     }
-                } else {
-                    None
+                    if node_map.contains_key(&parent_id) {
+                        return Some(parent_id);
+                    }
+                    current = parent_id;
                 }
+                None
             }
 
             let parent_id = find_accesskit_parent(&state.parent_map, builders, id)
@@ -679,6 +684,7 @@ impl ContextImpl {
 
             let parent_builder = builders.get_mut(&parent_id)?;
             parent_builder.push_child(id.accesskit_id());
+            builders.insert(id, Default::default());
         }
 
         builders.get_mut(&id)
@@ -3220,11 +3226,14 @@ impl ContextImpl {
                     .filter(|id| state.nodes.contains_key(id))
                     .map_or(root_id, |id| id.accesskit_id());
                 // The `(id, node)` pairs of the coming `accesskit::TreeUpdate`:
-                let mut nodes: Vec<(accesskit::NodeId, accesskit::Node)> = state
+                let nodes: Vec<(accesskit::NodeId, accesskit::Node)> = state
                     .nodes
                     .into_iter()
                     .map(|(id, node)| (id.accesskit_id(), node))
                     .collect();
+                // SolidCraft (#14364): AccessKit keeps only the nodes it reaches from the root and
+                // stops the app when the focus names one it dropped.
+                let (mut nodes, focus_id) = reachable_accesskit_nodes(root_id, nodes, focus_id);
                 flatten_labelled_by(&mut nodes);
                 platform_output.accesskit_update = Some(accesskit::TreeUpdate {
                     nodes,
@@ -5016,6 +5025,41 @@ fn is_accesskit_visible(widgets: &crate::WidgetRects, parent_map: &IdMap<Id>, mu
     }
 }
 
+/// SolidCraft (#14364): the nodes of an AccessKit update that the root reaches through children,
+/// each listed as the child of one node only, and the focus when it is one of them (else the root).
+///
+/// AccessKit stops the app on an update whose focus it cannot find in the tree, and on a node no
+/// other node of the update or the tree names as a child; a node left out here cannot cause either.
+fn reachable_accesskit_nodes(
+    root: accesskit::NodeId,
+    nodes: Vec<(accesskit::NodeId, accesskit::Node)>,
+    focus: accesskit::NodeId,
+) -> (Vec<(accesskit::NodeId, accesskit::Node)>, accesskit::NodeId) {
+    let mut unvisited: std::collections::HashMap<accesskit::NodeId, accesskit::Node> =
+        nodes.into_iter().collect();
+    let mut reached = std::collections::HashSet::from([root]);
+    let mut kept = Vec::with_capacity(unvisited.len());
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        let Some(mut node) = unvisited.remove(&id) else {
+            continue;
+        };
+        let children: Vec<accesskit::NodeId> = node
+            .children()
+            .iter()
+            .copied()
+            .filter(|child| unvisited.contains_key(child) && reached.insert(*child))
+            .collect();
+        if children.len() != node.children().len() {
+            node.set_children(children.clone());
+        }
+        stack.extend(children.iter().rev());
+        kept.push((id, node));
+    }
+    let focus = if reached.contains(&focus) { focus } else { root };
+    (kept, focus)
+}
+
 fn flatten_labelled_by(nodes: &mut [(accesskit::NodeId, accesskit::Node)]) {
     profiling::function_scope!();
 
@@ -5702,6 +5746,87 @@ mod test {
                 "The request should have been cleared when fulfilled"
             );
             output.drop_without_applying_deltas();
+        }
+    }
+
+    /// Every node an AccessKit tree update names, reached from its root.
+    fn reached_from_root(update: &accesskit::TreeUpdate) -> std::collections::HashSet<accesskit::NodeId> {
+        let nodes: std::collections::HashMap<_, _> = update.nodes.iter().cloned().collect();
+        let Some(root) = update.tree.as_ref().map(|tree| tree.root) else {
+            return Default::default();
+        };
+        let mut reached = std::collections::HashSet::from([root]);
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            for child in nodes.get(&id).map(|node| node.children().to_vec()).unwrap_or_default() {
+                if reached.insert(child) {
+                    stack.push(child);
+                }
+            }
+        }
+        reached
+    }
+
+    /// SolidCraft (#14364): a focused node the root does not reach is dropped and the focus
+    /// moves to the root, and a child two nodes name stays under the first only.
+    #[test]
+    fn only_nodes_the_root_reaches_are_sent() {
+        use accesskit::{Node, NodeId, Role};
+
+        let (root, shared, orphan) = (NodeId(1), NodeId(2), NodeId(3));
+        let other = NodeId(4);
+        let mut root_node = Node::new(Role::Window);
+        root_node.set_children(vec![shared, other]);
+        let mut other_node = Node::new(Role::Group);
+        other_node.set_children(vec![shared]);
+        let mut orphan_node = Node::new(Role::Button);
+        orphan_node.set_children(vec![orphan]);
+        let nodes = vec![
+            (orphan, orphan_node),
+            (other, other_node),
+            (shared, Node::new(Role::Button)),
+            (root, root_node),
+        ];
+
+        let (kept, focus) = super::reachable_accesskit_nodes(root, nodes, orphan);
+
+        assert_eq!(focus, root);
+        let kept: std::collections::HashMap<_, _> = kept.into_iter().collect();
+        assert_eq!(kept.len(), 3);
+        assert!(!kept.contains_key(&orphan));
+        assert_eq!(kept[&root].children(), &[shared, other]);
+        assert!(kept[&other].children().is_empty());
+    }
+
+    /// SolidCraft (#14364): a focused widget registered as its own AccessKit parent, or in a
+    /// loop of parents, is still under the root, so a screen reader does not stop the app.
+    #[test]
+    fn a_focused_widget_in_a_parent_loop_stays_in_the_tree() {
+        use crate::Id;
+
+        let ctx = Context::default();
+        ctx.enable_accesskit();
+        let (looped, first, second) = (Id::new("looped"), Id::new("first"), Id::new("second"));
+        for _ in 0..2 {
+            let output = ctx.run_ui(Default::default(), |ui| {
+                let ctx = ui.ctx();
+                ctx.register_accesskit_parent(looped, looped);
+                ctx.register_accesskit_parent(first, second);
+                ctx.register_accesskit_parent(second, first);
+                for id in [looped, first, second] {
+                    ctx.accesskit_node_builder(id, |node| node.set_role(accesskit::Role::Button));
+                }
+                ui.memory_mut(|memory| memory.request_focus(looped));
+            });
+            let Some(update) = output.platform_output.accesskit_update else {
+                panic!("AccessKit is on, so a pass sends a tree update");
+            };
+            let reached = reached_from_root(&update);
+            assert!(reached.contains(&update.focus));
+            assert_eq!(reached.len(), update.nodes.len());
+            for id in [looped, first, second] {
+                assert!(reached.contains(&id.accesskit_id()));
+            }
         }
     }
 }

@@ -87,6 +87,13 @@ SolidCraft changes to egui and eframe:
   hit test the next pass would start with, run between passes against the last pass's widgets
   (`begin_pass` and it share `prev_pass_hits`); `WidgetHits` is exported for it. Test:
   `widget_hits_at_matches_the_next_pass`.
+- `crates/egui/src/context.rs`: the AccessKit tree update holds only the nodes its root reaches,
+  each under one parent, and its focus moves to the root when the focused node is not among them.
+  A widget registered as its own AccessKit parent was made its own child, a node AccessKit drops,
+  and a focus naming it stopped the app with "Focused ID ... is not in the node list" (#14364).
+  The parent lookup now runs before the node is added and goes round the parent map at most once,
+  so a loop of parents ends at the root. Tests: `only_nodes_the_root_reaches_are_sent`,
+  `a_focused_widget_in_a_parent_loop_stays_in_the_tree`.
 - `crates/eframe/src/native/file_storage.rs`, `crates/eframe/src/lib.rs`: `save_to_disk` writes
   the settings (`app.ron`) to a temporary file beside them, syncs it and renames it over them, so
   the file always holds one whole save. Two windows saving at once each truncated and wrote the
