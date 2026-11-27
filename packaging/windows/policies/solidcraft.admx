@@ -571,7 +571,7 @@
       <parentCategory ref="SolidCraft" />
       <supportedOn ref="SUPPORTED_SolidCraft_0_51" />
       <elements>
-        <text id="LogFolder" valueName="LogFolder" maxLength="4096" required="true" />
+        <text id="LogFolder" valueName="LogFolder" maxLength="4096" required="true" expandable="true" />
       </elements>
     </policy>
   </policies>

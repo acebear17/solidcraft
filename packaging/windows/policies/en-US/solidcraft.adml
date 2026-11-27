@@ -325,9 +325,9 @@ In the export dialog the setting shows as set by the organization. The person's 
       <string id="LogFolder">Log folder</string>
       <string id="LogFolder_Explain">The folder SolidCraft writes its log in: solidcraft.log, and the run before's solidcraft.previous.log. The log has every command and how it went and every message shown, and a problem report attaches its end.
 
-Enabled: enter the full path of a folder on this computer, for example C:\ProgramData\ACME\SolidCraft logs. SolidCraft makes the folder if it is missing; logs already in its data folder stay there until deleted. Choose a local folder: SolidCraft writes each line as it happens, so a slow network share slows it down. Everyone who uses SolidCraft needs to be able to write there, and two people running SolidCraft at once share the one log; set the policy per user to give each person their own folder.
+Enabled: enter the full path of a folder on this computer, for example C:\ProgramData\ACME\SolidCraft logs. The path may use environment variables, filled in for the person running SolidCraft: %LOCALAPPDATA%\ACME\SolidCraft logs, or C:\ProgramData\ACME\SolidCraft logs\%USERNAME%. SolidCraft makes the folder if it is missing; logs already in its data folder stay there until deleted. Choose a local folder: SolidCraft writes each line as it happens, so a slow network share slows it down. Everyone who uses SolidCraft needs to be able to write there. Two people running SolidCraft at once with the same folder share the one log; use %USERNAME% in the path, or a variable such as %LOCALAPPDATA%, to give each person their own folder.
 
-If the folder can't be made or written, SolidCraft keeps its log in its data folder and the log says why. A path that is not a full path, or has more than one line, is ignored.
+If the folder can't be made or written, SolidCraft keeps its log in its data folder and the log says why. A path that is not a full path, has more than one line, or uses a variable that is not set (or a % that doesn't start or end a variable) is ignored.
 
 Disabled or Not configured: the log stays in the logs folder of SolidCraft's data folder.
 

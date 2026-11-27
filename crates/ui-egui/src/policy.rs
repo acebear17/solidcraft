@@ -152,7 +152,9 @@ pub const ORGANIZATION_NAME: &str = "OrganizationName";
 pub const MAX_NAME: usize = 64;
 
 /// The folder SolidCraft writes its log in (`crate::log_file`), in place of
-/// `<data folder>/logs`: a `REG_SZ` full path. Mandatory only; it locks nothing.
+/// `<data folder>/logs`: a `REG_SZ` or `REG_EXPAND_SZ` full path, in which each `%NAME%` is
+/// the environment variable `NAME` of the person running SolidCraft (`%LOCALAPPDATA%`,
+/// `%USERNAME%`). Mandatory only; it locks nothing.
 pub const LOG_FOLDER: &str = "LogFolder";
 
 /// The longest [`LOG_FOLDER`] read, in bytes; a longer one is not set.
@@ -197,7 +199,8 @@ pub struct Layer {
     /// [`ORGANIZATION_NAME`], cleaned: one line, no control or direction characters, at most
     /// [`MAX_NAME`] characters, never empty.
     pub organization: Option<String>,
-    /// [`LOG_FOLDER`]: a full path on one line, at most [`MAX_LOG_FOLDER`] bytes.
+    /// [`LOG_FOLDER`] with its variables filled in: a full path on one line, at most
+    /// [`MAX_LOG_FOLDER`] bytes.
     pub log_folder: Option<std::path::PathBuf>,
 }
 
@@ -251,7 +254,7 @@ impl Layer {
         let log_folder = get(LOG_FOLDER).and_then(|value| {
             let folder = log_folder(&value);
             if folder.is_none() {
-                log::warn!("policy: {LOG_FOLDER} is {value:?}, not a full path on one line; ignored");
+                log::warn!("policy: {LOG_FOLDER} is {value:?}, not a full path on one line with only variables that are set; ignored");
             }
             folder
         });
@@ -338,13 +341,36 @@ fn parse(kind: Kind, value: &Value) -> Option<Setting> {
     }
 }
 
-/// `value` as a [`LOG_FOLDER`]: a full path (a relative one would depend on where SolidCraft
-/// was started), trimmed, without control characters; None for anything else.
+/// `value` as a [`LOG_FOLDER`], its variables taken from this process's environment.
 fn log_folder(value: &Value) -> Option<std::path::PathBuf> {
+    log_folder_in(value, &|name| std::env::var(name).ok())
+}
+
+/// `value` as a [`LOG_FOLDER`]: trimmed, each `%NAME%` replaced by `var(NAME)`, then a full
+/// path (a relative one would depend on where SolidCraft was started) without control
+/// characters, at most [`MAX_LOG_FOLDER`] bytes; None for anything else. A variable that is
+/// not set or is empty, a lone `%`, or a name with a separator in it is None, not a folder
+/// with `%` in its name: two people would share it.
+fn log_folder_in(value: &Value, var: &dyn Fn(&str) -> Option<String>) -> Option<std::path::PathBuf> {
     let Value::Text(text) = value else { return None };
     let text = text.trim();
-    let path = std::path::Path::new(text);
-    (text.len() <= MAX_LOG_FOLDER && !text.chars().any(char::is_control) && path.is_absolute()).then(|| path.to_path_buf())
+    if text.len() > MAX_LOG_FOLDER {
+        return None;
+    }
+    let mut parts = text.split('%');
+    let mut folder = parts.next().map(str::to_owned)?;
+    while let Some(name) = parts.next() {
+        // A name needs its closing `%`: the part after it is the text that follows.
+        let after = parts.next()?;
+        if name.is_empty() || name.contains(['/', '\\']) || name.chars().any(char::is_control) {
+            return None;
+        }
+        let set = var(name).filter(|value| !value.trim().is_empty())?;
+        folder.push_str(&set);
+        folder.push_str(after);
+    }
+    let path = std::path::Path::new(&folder);
+    (folder.len() <= MAX_LOG_FOLDER && !folder.chars().any(char::is_control) && path.is_absolute()).then(|| path.to_path_buf())
 }
 
 /// The preference `pref` of `p` (None: not one of [`LOCKS`]).
@@ -1018,6 +1044,40 @@ mod tests {
     }
 
     #[test]
+    fn a_log_folder_fills_in_each_variable_and_one_not_set_leaves_it_unset() {
+        let (local, data) = if cfg!(windows) { (r"C:\Users\alice\AppData\Local", r"C:\ProgramData") } else { ("/home/alice/.local/share", "/var/lib") };
+        let var = |name: &str| match name {
+            "LOCALAPPDATA" => Some(local.to_owned()),
+            "PROGRAMDATA" => Some(data.to_owned()),
+            "USERNAME" => Some("alice".to_owned()),
+            "BLANK" => Some("  ".to_owned()),
+            _ => None,
+        };
+        let folder = |text: &str| log_folder_in(&Value::Text(text.into()), &var);
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(folder(&format!("%LOCALAPPDATA%{sep}ACME{sep}logs")), Some(std::path::PathBuf::from(format!("{local}{sep}ACME{sep}logs"))));
+        assert_eq!(folder(&format!(" %PROGRAMDATA%{sep}logs{sep}%USERNAME% ")), Some(std::path::PathBuf::from(format!("{data}{sep}logs{sep}alice"))));
+        for refused in [
+            "%NOT_SET%/logs".to_owned(),
+            format!("{data}{sep}%BLANK%"),
+            format!("{data}{sep}100%"),
+            format!("{data}{sep}%%"),
+            format!("{data}{sep}%USERNAME%{sep}%"),
+            format!("{data}{sep}a%b{sep}c%"),
+            "%USERNAME%/logs".to_owned(),
+            format!("%PROGRAMDATA%{sep}{}", "x".repeat(MAX_LOG_FOLDER)),
+            "%".repeat(MAX_LOG_FOLDER),
+        ] {
+            assert_eq!(folder(&refused), None, "{refused}");
+        }
+        let long = format!("{data}{sep}%USERNAME%");
+        let huge = |_: &str| Some("x".repeat(MAX_LOG_FOLDER));
+        assert_eq!(log_folder_in(&Value::Text(long), &huge), None, "the filled-in path is held to the same length");
+        let newline = |_: &str| Some("a\nb".to_owned());
+        assert_eq!(log_folder_in(&Value::Text(format!("{data}{sep}%USERNAME%")), &newline), None, "a variable can't add a second line");
+    }
+
+    #[test]
     fn the_theme_file_is_one_line_path_and_anything_else_is_not_set() {
         assert_eq!(one(THEME_FILE, Value::Text(r"  C:\ProgramData\ACME\theme.json ".into())), text(r"C:\ProgramData\ACME\theme.json"));
         assert_eq!(one(THEME_FILE, Value::Text("/etc/solidcraft/acme-theme.json".into())), text("/etc/solidcraft/acme-theme.json"));
@@ -1517,8 +1577,11 @@ mod tests {
     fn the_templates_offer_every_policy_the_app_reads() {
         let admx = include_str!("../../../packaging/windows/policies/solidcraft.admx");
         let adml = include_str!("../../../packaging/windows/policies/en-US/solidcraft.adml");
-        for name in LOCKS.iter().map(|lock| lock.policy).chain(ALLOWS.iter().map(|(policy, _)| *policy)).chain([LOG_FOLDER, ORGANIZATION_NAME, USAGE_STATISTICS])
-        {
+        for name in LOCKS.iter().map(|lock| lock.policy).chain(ALLOWS.iter().map(|(policy, _)| *policy)).chain([
+            LOG_FOLDER,
+            ORGANIZATION_NAME,
+            USAGE_STATISTICS,
+        ]) {
             assert!(admx.contains(&format!(r#"valueName="{name}""#)), "{name} is missing from solidcraft.admx");
             assert!(adml.contains(&format!(r#"<string id="{name}">"#)), "{name} is missing from solidcraft.adml");
         }
