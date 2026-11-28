@@ -1244,14 +1244,16 @@ struct Residual {
 }
 
 impl Residual {
-    /// Every coefficient within its rounding (not a number is not).
+    /// Every coefficient within its rounding (not a number is not). A rounding that
+    /// overflowed (or is not a number) bounds nothing, so no coefficient is within it.
     fn within(&self) -> bool {
-        self.coefficients.iter().all(|v| {
-            matches!(
-                v.abs().partial_cmp(&self.tol),
-                Some(core::cmp::Ordering::Less | core::cmp::Ordering::Equal)
-            )
-        })
+        self.tol.is_finite()
+            && self.coefficients.iter().all(|v| {
+                matches!(
+                    v.abs().partial_cmp(&self.tol),
+                    Some(core::cmp::Ordering::Less | core::cmp::Ordering::Equal)
+                )
+            })
     }
 }
 
@@ -1393,7 +1395,8 @@ fn curve_segments(curve: &BSplineCurve) -> Result<(Vec<CurveSegment>, Vec3)> {
 /// rounding of computing it, `gamma_K` times the size of its terms in the spine's
 /// absolute points (the move to `O` is exact algebra; its rounding is theirs), as
 /// [`lies_on`]. Each quadric's constant counts at the larger of its own size and
-/// `constants`, the size of the terms it was computed from.
+/// `constants`, the size of the terms it was computed from. A bound that overflows (or is
+/// NaN) proves nothing, so the spine is then not on the quadrics.
 ///
 /// # Errors
 ///
@@ -1432,7 +1435,8 @@ fn spine_on_offsets(
             // c is rounded at the size of the terms it was computed from, not at its own size
             let scale = amax * ya * ya + 2.0 * bmax * ya * vs + c.abs().max(c_terms) * vs * vs;
             let tol = gamma(8 * (p + 1) + 16) * scale;
-            if !f.c.iter().all(|x| x.abs() <= tol) {
+            // a scale that overflowed bounds nothing: refuse rather than accept every residual
+            if !tol.is_finite() || !f.c.iter().all(|x| x.abs() <= tol) {
                 return Ok(false);
             }
         }
@@ -1763,7 +1767,8 @@ fn breaks(knots: &[f64]) -> Vec<f64> {
 /// every Bernstein coefficient of `|X V - W Y|^2 - r^2 W^2 V^2` (homogeneous `(X, W)` of
 /// the net, both about the spine's first point) is within the rounding of computing it,
 /// `gamma_K` times the size of its terms in the absolute points, as [`lies_on`]. A patch
-/// whose span runs over a joint of the spine's segments, or off the spine, is not on it.
+/// whose span runs over a joint of the spine's segments, or off the spine, is not on it,
+/// and so is one whose rounding overflows (or is not a number): that bounds nothing.
 ///
 /// # Errors
 ///
@@ -1872,7 +1877,8 @@ fn lies_on_canal(
             let size = xa * vm + wm * ya + radius * wm * vm;
             let spine_degree = v.p.max(v.q);
             let tol = gamma(8 * (p + spine_degree + 1) * (q + spine_degree + 1) + 16) * size * size;
-            if !f.c.iter().all(|c| c.abs() <= tol) {
+            // a size that overflowed bounds nothing: refuse rather than accept every residual
+            if !tol.is_finite() || !f.c.iter().all(|c| c.abs() <= tol) {
                 return Ok(false);
             }
         }
@@ -3724,6 +3730,54 @@ mod tests {
             form.into_owned(),
             AnalyticSupport::of(s).unwrap().implicit(),
         )
+    }
+
+    /// #3384: a sphere so large that its residual's rounding (`(size + r)(|H| + r)`, centre
+    /// 1e154 from the origin on radius 1e154) overflows proves nothing, so [`curve_lies_on`]
+    /// refuses even a line plainly off it (a chord 1e145 above its top), whose residual (about
+    /// 2e299) is finite, instead of bounding that residual by infinity.
+    #[test]
+    fn a_sphere_whose_rounding_overflows_holds_no_curve() {
+        use crate::curve::line::Line;
+        let (r, s) = (1e154_f64, 1e145_f64);
+        let chord = Line::from_points(Vec3::new(s, s, 0.0), Vec3::new(-s, s, 0.0), 3);
+        let sphere = Implicit::Sphere {
+            centre: Vec3::new(0.0, -r, 0.0),
+            radius: r,
+        };
+        assert!(!curve_lies_on(&chord.base_with_nurb().unwrap(), &sphere).unwrap());
+    }
+
+    /// #3384: a pipe whose residual's rounding (`γ size²`, the spine 1e170 from the origin)
+    /// overflows proves nothing, so [`lies_on_canal`] refuses even a flat patch plainly off it
+    /// (2 to 3 from a spine of radius 1, a residual of at least 3), instead of bounding that
+    /// residual by infinity.
+    #[test]
+    fn a_pipe_whose_rounding_overflows_holds_no_patch() {
+        use crate::curve::line::Line;
+        let b = 1e170_f64;
+        let spine = Line::from_points(Vec3::new(b, 0.0, 0.0), Vec3::new(b, 0.0, 1.0), 3);
+        let patch = BSplineSurface::create_canonical(&CanonicalSurfaceData {
+            u_degree: 1,
+            v_degree: 1,
+            control_points: &[
+                Point3::new(b, 2.0, 0.0),
+                Point3::new(b, 3.0, 0.0),
+                Point3::new(b, 2.0, 1.0),
+                Point3::new(b, 3.0, 1.0),
+            ],
+            form: BSplineSurfaceForm::Unspecified,
+            u_multiplicities: &[2, 2],
+            v_multiplicities: &[2, 2],
+            u_knots: &[0.0, 1.0],
+            v_knots: &[0.0, 1.0],
+            knot_type: KnotType::Unspecified,
+            weights: Some(&[1.0; 4]),
+            uv_domain: None,
+        })
+        .unwrap();
+        let spine = spine.base_with_nurb().unwrap();
+        assert!(!lies_on_canal(&patch, &spine, &LeaderMap::default(), 1.0).unwrap());
     }
 
     /// The side bounds' reading and decomposition are bounded before they start. A net of

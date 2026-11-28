@@ -774,3 +774,23 @@ fn a_flat_arc_about_a_far_centre_is_proved_on_its_circle_and_no_further() {
     assert!(on_conic(&arc(0.0), o, x, y, r, r, true).unwrap());
     assert!(!on_conic(&arc(1e-11 * r), o, x, y, r, r, true).unwrap());
 }
+
+/// #3384: a conic so large that the size of its sphere's constant (`|o|^2 + r^2`, centre 1e154
+/// from the origin on radius 1e154) overflows proves nothing, so [`on_conic`] refuses even a
+/// form plainly off it (a chord 1e145 above the circle's top) instead of bounding its residual
+/// by infinity.
+#[test]
+fn a_conic_whose_proof_bound_overflows_proves_nothing() {
+    let r = 1e154_f64;
+    let s = 1e145_f64;
+    let chord = spline(
+        &[0.0, 0.0, 1.0, 1.0],
+        &[[s, s, 0.0, 1.0], [-s, s, 0.0, 1.0]],
+        3,
+        true,
+        OP,
+    )
+    .unwrap();
+    let (o, x, y) = axes(&frame([0.0, -r, 0.0])).unwrap();
+    assert!(!on_conic(&chord, o, x, y, r, r, true).unwrap());
+}
