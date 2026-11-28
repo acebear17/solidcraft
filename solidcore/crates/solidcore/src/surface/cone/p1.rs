@@ -1323,12 +1323,27 @@ impl Cone {
         }
         let height = -self.base_radius / (self.semi_angle_deg * PI / 180.0).tan();
         let point = self.rev.position.origin() + height * self.rev.position.z_axis();
-        // Not upstream (#3386): a generator line's STEP parameter is the height along the
-        // axis (built so, and kept so by `Line::transform`), so the apex's is its height;
+        // Not upstream (#3386): a generator line that starts in the base plane with an
+        // axial speed of 1 has the height along the axis as its STEP parameter (a cone
+        // builds it so, and `transform` keeps it so), and the apex's is its height;
         // upstream inverts the apex point on the line, whose world coordinates round with
-        // the distance the cone was moved (1e-12 at 1e4).
+        // the distance the cone was moved (1e-12 inside the domain at 1e4). Both tests
+        // allow the rounding of those coordinates (`EFF_ZERO` of the distance from the
+        // world origin), within which the two answers differ only by that rounding. Any
+        // other generator is inverted as upstream does.
         let gen = self.gen()?;
-        let param = if matches!(gen.kind(), CurveKind::Line(_)) {
+        let origin = self.rev.position.origin();
+        let z_axis = self.rev.position.z_axis();
+        let on_height = match gen.kind() {
+            CurveKind::Line(line) => {
+                let c = line.canonical();
+                let rounding = EFF_ZERO * (1.0 + origin.length() + c.point.length());
+                (c.point - origin).dot(z_axis).abs() <= rounding
+                    && are_same_to_tol(c.vector.dot(z_axis), 1.0, rounding)
+            }
+            _ => false,
+        };
+        let param = if on_height {
             height
         } else {
             gen.step_inversion(k, point)?
@@ -2042,6 +2057,18 @@ impl Cone {
                     // Don't call SetCanonical: that recreates m_pNurb.
                     gen_line.set_line_scale(speed);
                     gen_line.set_analytic_domain(v_ivl);
+                }
+            } else {
+                // (Not upstream, #3386: a rigid motion rebuilds the generator's step from
+                // its moved ends (`Line::transform`), which rounds by an ulp of the distance
+                // moved, so a cone moved 1e5 away kept a speed 1.8e-11 off 1/cos of its
+                // half angle and failed "Bad Cone Line Scale". A speed off by more than
+                // the check's own rounding term is the semi-angle's again; the domain
+                // already has the height domain's length.)
+                let speed = 1.0 / deg2rad(semi_angle_deg).cos();
+                let line_scale = gen_line.line_scale();
+                if !are_same_to_tol(line_scale, speed, EFF_ZERO * (1.0 + line_scale)) {
+                    gen_line.set_line_scale(speed);
                 }
             }
         }

@@ -2060,9 +2060,8 @@ impl Line {
     }
 
     /// Scales (about the origin, per axis) and then rotates and moves the line
-    /// (`Transform`); point, unit vector and scale are rebuilt from the image of the
-    /// STEP point at 0 and of the step to the point at 1, and an existing NURB is
-    /// transformed.
+    /// (`Transform`); point, unit vector and scale are rebuilt from the images of the
+    /// STEP points at 0 and 1, and an existing NURB is transformed.
     ///
     /// # Errors
     ///
@@ -2076,27 +2075,23 @@ impl Line {
             return Ok(());
         }
 
-        // Get Anal StartPoint and the step from it to the Line(1.0) point.
+        // Get Anal StartPoint and Line(1.0) point.
         let mut start = self.point;
-        let mut step = self.vector * self.scale;
+        let mut end = self.evaluate_step_point(1.0);
 
-        // scale the point and the step
+        // scale the points
         if let Some(s) = scale {
             start = start.multiply(s);
-            step = step.multiply(s);
+            end = end.multiply(s);
         }
 
-        // rotate and move the point; rotate the step
-        // (Not upstream, #3386: upstream moves the Line(1.0) point too and takes the step as
-        // the difference of the two moved points, which rounds by an ulp of the distance
-        // moved: a cone's generator moved 1e5 away no longer had the speed 1/cos of its
-        // half angle that makes its parameter the cone's height.)
+        // rotate and move the points
         start = rotate_n_move.transform_point(start);
-        step = rotate_n_move.transform_vector(step);
+        end = rotate_n_move.transform_point(end);
 
         // reset the analytic parameters
         self.point = start;
-        self.vector = step;
+        self.vector = end - start;
         self.scale = self.vector.length();
         self.vector = self.vector.unitize_or_z();
 

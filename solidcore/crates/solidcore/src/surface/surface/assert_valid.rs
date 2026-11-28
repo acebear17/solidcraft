@@ -3888,8 +3888,9 @@ mod tests {
 
     /// A pointed cone (base radius 5, apex at height 10) is valid after every rigid motion
     /// of #3386, and after the same motions moved 10, 100 and 1000 times as far. Two
-    /// roundings grew with the distance moved: the generator's speed, taken as the
-    /// difference of two moved points, drifted from the 1/cos of the half angle that
+    /// roundings grew with the distance moved: the generator's speed, which
+    /// `Line::transform` takes as the difference of two moved points and the cone's
+    /// transform kept, drifted from the 1/cos of the half angle that
     /// `Bad Cone Line Scale` checks (1.8e-11 at 1e5), and the apex parameter, from
     /// inverting the moved apex point on the moved line, fell inside the height domain
     /// that `Bad Cone Pole` checks (1.09e-12 inside at motion 14).
