@@ -3038,3 +3038,350 @@ fn a_collision_shape_survives_a_link_update() {
     assert_eq!(run(&mut s, "component.update_links", json!({}))["updated"].as_array().unwrap().len(), 1);
     assert_eq!(s.doc.collision_shapes, before);
 }
+
+/// A Hole placed on a neighbour-qualified face of a linked component (`F<id>:link:<hash1>#[…]`)
+/// must survive deleting an unrelated cut elsewhere in the linked part and running
+/// `component.relink` — both when deleting the cut makes the face whole again and when an
+/// assembly-level cut still splits the linked face — while replacing the target face itself with
+/// a new feature's face at the same coordinates still asks to reselect.
+#[test]
+fn hole_on_linked_qualified_face_survives_relink_when_distant_cut_deleted() {
+    let dir = folder("hole-qualified-face-relink");
+    let before = dir.join("beam-before.sc");
+    let after = dir.join("beam-after.sc");
+    let replaced = dir.join("beam-replaced.sc");
+
+    let mut beam = Session::default();
+    run(&mut beam, "solid.box", json!({"corner": [0, 0, 0], "length": 200, "width": 40, "height": 20, "body_name": "Beam"}));
+    run(&mut beam, "solid.hole", json!({"position": [50, 20, 20], "direction": [0, 0, -1], "diameter": 6, "depth": 8, "name": "PilotA"}));
+    run(&mut beam, "solid.hole", json!({"position": [125, 20, 20], "direction": [0, 0, -1], "diameter": 6, "depth": 8, "name": "PilotB"}));
+    // Distant cut at x = 155..167 splits F1:+z into x = 0..155 and x = 167..200.
+    run(&mut beam, "solid.box", json!({"corner": [155, -2, 12], "length": 12, "width": 44, "height": 10, "operation": "cut", "name": "DistantCut"}));
+    run(&mut beam, "file.save", json!({"path": before}));
+
+    // Delete the unrelated distant cut: F1:+z becomes whole in the linked part.
+    run(&mut beam, "timeline.delete", json!({"features": ["DistantCut"]}));
+    run(&mut beam, "file.save", json!({"path": after}));
+
+    // Negative source: replace the original block with a brand-new box at the exact same
+    // coordinates so the original target face stem (`F1:+z`) no longer exists.
+    run(&mut beam, "timeline.delete", json!({"features": ["PilotA", "PilotB"]}));
+    let box_id = beam.doc.features.first().unwrap().id;
+    run(&mut beam, "timeline.delete", json!({"feature": box_id}));
+    run(&mut beam, "solid.box", json!({"corner": [0, 0, 0], "length": 200, "width": 40, "height": 20, "body_name": "Beam"}));
+    run(&mut beam, "file.save", json!({"path": replaced}));
+
+    let hole_vol = std::f64::consts::PI * 9.0 * 10.0;
+    let pilot_vol = 2.0 * std::f64::consts::PI * 9.0 * 8.0;
+
+    // Case 1: deleting DistantCut makes the linked top face whole again (`F<id>:link:<hash1>`).
+    // Both `"keep"` and `"sync"` relink modes must keep MountHole green.
+    {
+        let mut s = Session::default();
+        let link = run(&mut s, "component.insert_design", json!({"path": before, "name": "Beam"}));
+        let comp = link["component"].as_u64().unwrap();
+        let hole_id = run(
+            &mut s,
+            "solid.hole",
+            json!({"position": [25, 20, 20], "direction": [0, 0, -1], "diameter": 6, "depth": 10, "name": "MountHole"}),
+        )["feature"]
+            .as_u64()
+            .unwrap();
+        let stored = s.doc.feature(hole_id).unwrap().face_names.clone();
+        assert!(
+            stored.first().is_some_and(|n| n.contains(":link:") && n.contains("#[")),
+            "expected linked neighbour-qualified face name: {stored:?}"
+        );
+        assert_eq!(s.model.result(hole_id).and_then(|r| r.error.clone()), None);
+
+        for mode in ["keep", "sync"] {
+            run(&mut s, "component.relink", json!({"component": comp, "path": after, "names": mode}));
+            let res = s.model.result(hole_id).unwrap();
+            assert_eq!(res.error, None, "mode={mode}: hole must survive relink when distant cut is deleted");
+            assert_eq!(res.warning, None, "mode={mode}: hole should rebuild without warning");
+            let v = run(&mut s, "inspect.measure", json!({}))["total"]["volume_mm3"].as_f64().unwrap();
+            let expected = 200.0 * 40.0 * 20.0 - pilot_vol - hole_vol;
+            assert!((v - expected).abs() < 0.05, "mode={mode}: {v} vs {expected}");
+        }
+
+        // Negative check: when the target face stem itself disappears, MountHole must ask to reselect.
+        run(&mut s, "component.relink", json!({"component": comp, "path": replaced, "names": "keep"}));
+        let err = s.model.result(hole_id).and_then(|r| r.error.clone()).unwrap_or_default();
+        assert!(err.contains("no longer exists as it was picked; reselect it"), "{err}");
+    }
+
+    // Case 2: an assembly-level cut (`AssemblyCut`) also splits the linked face, so MountHole's
+    // stored qualifier carries both `:link:` faces (inherited across both sides of AssemblyCut)
+    // and the assembly cut face (`F<asm>:-x`). Deleting DistantCut and relinking leaves both
+    // assembly pieces sharing inherited linked neighbours; MountHole must still resolve at its
+    // pick point and survive cold reopen.
+    {
+        let mut s = Session::default();
+        let link = run(&mut s, "component.insert_design", json!({"path": before, "name": "Beam"}));
+        let comp = link["component"].as_u64().unwrap();
+        let asm_cut_id = run(
+            &mut s,
+            "solid.box",
+            json!({"corner": [90, -2, 12], "length": 10, "width": 44, "height": 10, "operation": "cut", "targets": ["Beam"], "name": "AssemblyCut"}),
+        )["feature"]
+            .as_u64()
+            .unwrap();
+        let hole_id = run(
+            &mut s,
+            "solid.hole",
+            json!({"position": [25, 20, 20], "direction": [0, 0, -1], "diameter": 6, "depth": 10, "name": "MountHole"}),
+        )["feature"]
+            .as_u64()
+            .unwrap();
+        let stored = s.doc.feature(hole_id).unwrap().face_names.clone();
+        assert!(
+            stored.first().is_some_and(|n| n.contains(":link:") && n.contains("#[") && n.contains(&format!("F{asm_cut_id}:"))),
+            "expected linked + assembly neighbour qualifier: {stored:?}"
+        );
+
+        run(&mut s, "component.relink", json!({"component": comp, "path": after, "names": "sync"}));
+        let res = s.model.result(hole_id).unwrap();
+        assert_eq!(res.error, None, "hole on assembly-split linked face must survive relink");
+        assert_eq!(res.warning, None);
+
+        let reopened = Session::new(solidcraft_doc::format::read(&s.doc.to_json()).unwrap());
+        let reopened_res = reopened.model.result(hole_id).unwrap();
+        assert_eq!(reopened_res.error, None, "cold reopen must keep hole resolved");
+        assert_eq!(reopened_res.warning, None);
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// When `component.relink` binds an existing carried face name to an opposite/incompatible face
+/// on the replacement design, `component.relink` reports the per-joint frame deviation, flags the
+/// incompatible re-binding in `joint_errors` and `warnings`, and reports the moved occurrence.
+#[test]
+fn relink_reports_incompatible_face_rebinding_and_occurrence_displacement() {
+    let dir = folder("relink-incompatible-face");
+    let frame_v1 = dir.join("base_frame_v1.sc");
+    let frame_v2 = dir.join("base_frame_v2.sc");
+    let slide = dir.join("slide_block.sc");
+
+    let mut v1 = Session::default();
+    run(&mut v1, "solid.box", json!({"length": 100, "width": 40, "height": 20, "corner": [0, 0, 0], "body_name": "BaseFrame"}));
+    run(&mut v1, "file.save", json!({"path": frame_v1}));
+
+    // Same box history rotated 180 deg around Z at its centre so the carried face name that was
+    // the +X end face (normal +X, x = 100) lands on the -X end face (normal -X, x = 0).
+    let mut v2 = Session::default();
+    run(&mut v2, "solid.box", json!({"length": 100, "width": 40, "height": 22, "corner": [0, 0, 0], "body_name": "BaseFrame"}));
+    run(&mut v2, "solid.move", json!({"bodies": ["BaseFrame"], "axis": [0, 0, 1], "angle": "180 deg", "origin": [50, 20, 0]}));
+    run(&mut v2, "file.save", json!({"path": frame_v2}));
+
+    let mut blk = Session::default();
+    run(&mut blk, "solid.box", json!({"length": 20, "width": 20, "height": 20, "corner": [0, 0, 0], "body_name": "SlideBlock"}));
+    run(&mut blk, "file.save", json!({"path": slide}));
+
+    let mut asm = Session::default();
+    let frame = run(&mut asm, "component.insert_design", json!({"path": frame_v1, "name": "BaseFrame"}));
+    let frame_comp = frame["component"].as_u64().unwrap();
+    let frame_occ = frame["occurrence"].as_u64().unwrap();
+    run(&mut asm, "occurrence.ground", json!({"occurrence": frame_occ, "grounded": true}));
+
+    let block = run(&mut asm, "component.insert_design", json!({"path": slide, "name": "SlideBlock"}));
+    let block_occ = block["occurrence"].as_u64().unwrap();
+    run(&mut asm, "occurrence.ground", json!({"occurrence": block_occ, "grounded": false}));
+
+    let created = run(
+        &mut asm,
+        "joint.create",
+        json!({
+            "name": "EndJoint",
+            "type": "rigid",
+            "a": {"occurrence": frame_occ, "face": [100, 20, 10]},
+            "b": {"occurrence": block_occ, "face": [0, 10, 10]}
+        }),
+    );
+    assert_eq!(created["errors"], json!([]), "{created}");
+
+    let result = run(&mut asm, "component.relink", json!({"component": frame_comp, "path": frame_v2}));
+    assert_eq!(result["geometry_changed"], true, "{result}");
+
+    let devs = result["joint_deviations"].as_array().unwrap();
+    let dev = devs.iter().find(|d| d["name"] == "EndJoint").unwrap_or_else(|| panic!("expected EndJoint deviation: {result}"));
+    assert_eq!(dev["side"], "a", "{dev}");
+    assert!(dev["face"].as_str().is_some_and(|f| f.contains(":link:")), "{dev}");
+    assert!(dev["origin_shift_mm"].as_f64().unwrap() > 99.0, "{dev}");
+    assert!(dev["normal_angle_deg"].as_f64().unwrap() > 179.0, "{dev}");
+    assert_eq!(dev["incompatible"], true, "{dev}");
+
+    let errs = result["joint_errors"].as_array().unwrap();
+    assert!(errs.iter().any(|e| e["name"] == "EndJoint" && e["why"].as_str().is_some_and(|w| w.contains("incompatible face"))), "{result}");
+
+    let moved = result["moved_occurrences"].as_array().unwrap();
+    let occ = moved.iter().find(|m| m["occurrence"] == block_occ).unwrap_or_else(|| panic!("expected moved SlideBlock: {result}"));
+    assert!(occ["translation_mm"].as_f64().unwrap() > 50.0, "{occ}");
+    assert!(occ["rotation_deg"].as_f64().unwrap() > 179.0, "{occ}");
+
+    let warnings = result["warnings"].as_array().unwrap();
+    assert!(warnings.iter().any(|w| w.as_str().is_some_and(|s| s.contains("EndJoint") && s.contains("incompatible face"))), "{result}");
+    assert!(warnings.iter().any(|w| w.as_str().is_some_and(|s| s.contains("SlideBlock") && s.contains("moved by"))), "{result}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A legitimate resize that shifts a mated face parallel to itself reports the deviation and
+/// occurrence move without flagging an incompatible face error.
+#[test]
+fn relink_reports_mild_face_shift_without_flagging_incompatible() {
+    let dir = folder("relink-mild-shift");
+    let plate_short = dir.join("mount_plate_short.sc");
+    let plate_tall = dir.join("mount_plate_tall.sc");
+    let cap_file = dir.join("cap_block.sc");
+
+    part(&plate_short, 30);
+    part(&plate_tall, 45);
+    part(&cap_file, 10);
+
+    let mut asm = Session::default();
+    let plate = run(&mut asm, "component.insert_design", json!({"path": plate_short, "name": "MountPlate"}));
+    let plate_comp = plate["component"].as_u64().unwrap();
+    let plate_occ = plate["occurrence"].as_u64().unwrap();
+    run(&mut asm, "occurrence.ground", json!({"occurrence": plate_occ, "grounded": true}));
+
+    let cap = run(&mut asm, "component.insert_design", json!({"path": cap_file, "name": "CapBlock"}));
+    let cap_occ = cap["occurrence"].as_u64().unwrap();
+    run(&mut asm, "occurrence.ground", json!({"occurrence": cap_occ, "grounded": false}));
+
+    let created = run(
+        &mut asm,
+        "joint.create",
+        json!({
+            "name": "TopMount",
+            "type": "rigid",
+            "a": {"occurrence": plate_occ, "face": [5, 10, 30]},
+            "b": {"occurrence": cap_occ, "face": [5, 10, 0]}
+        }),
+    );
+    assert_eq!(created["errors"], json!([]), "{created}");
+
+    let result = run(&mut asm, "component.relink", json!({"component": plate_comp, "path": plate_tall}));
+    assert_eq!(result["joint_errors"], json!([]), "{result}");
+    assert_eq!(result["joint_conflicts"], json!([]), "{result}");
+
+    let devs = result["joint_deviations"].as_array().unwrap();
+    let dev = devs.iter().find(|d| d["name"] == "TopMount").unwrap_or_else(|| panic!("expected TopMount deviation: {result}"));
+    assert!((dev["origin_shift_mm"].as_f64().unwrap() - 15.0).abs() < 1e-3, "{dev}");
+    assert!(dev["normal_angle_deg"].as_f64().unwrap() < 1e-3, "{dev}");
+    assert_eq!(dev["incompatible"], false, "{dev}");
+
+    let moved = result["moved_occurrences"].as_array().unwrap();
+    let occ = moved.iter().find(|m| m["occurrence"] == cap_occ).unwrap_or_else(|| panic!("expected moved CapBlock: {result}"));
+    assert!((occ["translation_mm"].as_f64().unwrap() - 15.0).abs() < 1e-3, "{occ}");
+    assert!(occ["rotation_deg"].as_f64().unwrap() < 1e-3, "{occ}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Single-placement relink must not silently re-bind a joint face via geometric proximity onto an
+/// opposite-normal face sitting on the same plane.
+#[test]
+fn relink_placement_refuses_incompatible_face_fallback() {
+    let dir = folder("relink-placement-opposite-face");
+    let block_v1 = dir.join("mount_block_v1.sc");
+    let block_v2 = dir.join("mount_block_v2.sc");
+    let cap_file = dir.join("cap_block.sc");
+
+    let mut v1 = Session::default();
+    run(&mut v1, "solid.box", json!({"length": 100, "width": 40, "height": 20, "corner": [0, 0, 0], "body_name": "MountBlock"}));
+    run(&mut v1, "file.save", json!({"path": block_v1}));
+
+    // Shifted up by 20 mm so its bottom (-Z) face lies on z = 20 where v1's top (+Z) face was.
+    let mut v2 = Session::default();
+    run(&mut v2, "solid.box", json!({"length": 100, "width": 40, "height": 20, "corner": [0, 0, 20], "body_name": "MountBlock"}));
+    run(&mut v2, "file.save", json!({"path": block_v2}));
+
+    part(&cap_file, 10);
+
+    let mut asm = Session::default();
+    let inserted = run(&mut asm, "component.insert_design", json!({"path": block_v1, "name": "MountBlock"}));
+    let comp = inserted["component"].as_u64().unwrap();
+    let first = inserted["occurrence"].as_u64().unwrap();
+    let second = run(&mut asm, "occurrence.copy", json!({"occurrence": first, "translate": [200, 0, 0]}))["occurrence"].as_u64().unwrap();
+    run(&mut asm, "occurrence.ground", json!({"occurrence": second, "grounded": true}));
+
+    let cap = run(&mut asm, "component.insert_design", json!({"path": cap_file, "name": "CapBlock"}));
+    let cap_occ = cap["occurrence"].as_u64().unwrap();
+    run(&mut asm, "occurrence.ground", json!({"occurrence": cap_occ, "grounded": false}));
+
+    let created = run(
+        &mut asm,
+        "joint.create",
+        json!({
+            "name": "TopSeat",
+            "type": "rigid",
+            "a": {"occurrence": second, "face": [250, 20, 20]},
+            "b": {"occurrence": cap_occ, "face": [5, 10, 0]}
+        }),
+    );
+    assert_eq!(created["errors"], json!([]), "{created}");
+
+    let result = run(&mut asm, "component.relink", json!({"component": comp, "occurrence": second, "path": block_v2}));
+    let errs = result["joint_errors"].as_array().unwrap();
+    assert!(
+        errs.iter().any(|e| e["name"] == "TopSeat" && e["why"].as_str().is_some_and(|w| w.contains("no longer exists"))),
+        "expected TopSeat to fail instead of rebinding to opposite-normal face: {result}"
+    );
+    assert_eq!(result["moved_occurrences"], json!([]), "failed joint must not move CapBlock: {result}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// #22615: A between-two-faces midplane joint origin with a hole-circle snap keeps its persistent
+/// face names across `component.relink` and automatically re-centers the joined shaft when the
+/// relinked part's wall spacing changes.
+#[test]
+fn between_faces_midplane_origin_survives_component_relink() {
+    let dir = folder("between-faces-midplane-relink");
+    let clevis_v1 = dir.join("clevis_v1.sc");
+    let clevis_v2 = dir.join("clevis_v2.sc");
+
+    let save_clevis = |path: &Path, upper_z: f64| {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 40, "width": 40, "height": 5, "corner": [0, 0, 0], "body_name": "LowerEar"}));
+        run(&mut s, "solid.hole", json!({"position": [16, 20, 5], "diameter": 8}));
+        run(&mut s, "solid.box", json!({"length": 40, "width": 40, "height": 5, "corner": [0, 0, upper_z], "body_name": "UpperEar"}));
+        run(&mut s, "file.save", json!({"path": path}));
+    };
+    save_clevis(&clevis_v1, 25.0);
+    save_clevis(&clevis_v2, 35.0);
+
+    let mut asm = Session::default();
+    let inserted = run(&mut asm, "component.insert_design", json!({"path": clevis_v1, "name": "Clevis"}));
+    let comp = inserted["component"].as_u64().unwrap();
+    let clevis_occ = inserted["occurrence"].as_u64().unwrap();
+    run(&mut asm, "occurrence.ground", json!({"occurrence": clevis_occ, "grounded": true}));
+
+    run(&mut asm, "component.create", json!({"name": "Pin"}));
+    run(&mut asm, "solid.cylinder", json!({"base": [0, 0, 0], "radius": 4, "height": 16, "body_name": "Pin"}));
+    run(&mut asm, "component.activate", json!({"component": "root"}));
+    let pin_occ = asm.doc.occurrences.iter().find(|o| o.name.starts_with("Pin")).unwrap().id;
+
+    let created = run(
+        &mut asm,
+        "joint.create",
+        json!({
+            "name": "CenterPin",
+            "type": "revolute",
+            "a": {"occurrence": clevis_occ, "faces": [[2, 2, 5], [2, 2, 25]], "snap": {"circle": [20, 20, 2.5]}},
+            "b": {"occurrence": pin_occ, "faces": [[0, 0, 0], [0, 0, 16]], "snap": {"circle": [4, 0, 8]}},
+        }),
+    );
+    assert_eq!(created["errors"], json!([]), "{created}");
+
+    let pin_mid = |s: &Session| {
+        let t = solidcraft_doc::joints::occurrence_world(&s.doc, pin_occ);
+        solidcraft_doc::apply_point(&t, solidcore_record::Vec3::new(0.0, 0.0, 8.0))
+    };
+    let before = pin_mid(&asm);
+    assert!((before.x - 16.0).abs() < 1e-6 && (before.y - 20.0).abs() < 1e-6 && (before.z - 15.0).abs() < 1e-6, "{before:?}");
+
+    let relink = run(&mut asm, "component.relink", json!({"component": comp, "path": clevis_v2}));
+    assert_eq!(relink["joint_errors"], json!([]), "{relink}");
+    let after = pin_mid(&asm);
+    assert!((after.x - 16.0).abs() < 1e-6 && (after.y - 20.0).abs() < 1e-6 && (after.z - 20.0).abs() < 1e-6, "{after:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}

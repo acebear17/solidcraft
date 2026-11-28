@@ -374,10 +374,16 @@ const FEATURE_MARGIN: f64 = 0.25;
 /// (Fusion: 0.01 mm) beside geometry far finer (edges of 0.2 to 10 um in the same file). Taken
 /// as the solid's tolerance, such edges read as zero-length edges, coincident edges and loops
 /// that turn the wrong way, and the kernel refuses every operation on the solid.
+///
+/// An edge needs twice the stated tolerance, not once: each of its two vertices carries it,
+/// and on a shorter edge their tolerance balls overlap. A union that merges one of them with a
+/// vertex of the other operand then reaches the other one and refuses (#3212: a 0.01 mm round,
+/// edges of 0.0141 mm, in a file stating 0.01 mm).
 fn feature_tolerance(brep: &Brep, stated: f64) -> Option<f64> {
     let shortest = shortest_edge(brep);
-    // An edge as long as the stated tolerance or longer is one that tolerance tells apart.
-    if shortest >= stated {
+    // An edge of twice the stated tolerance or longer keeps its vertices' balls apart; the
+    // slack keeps an edge of exactly twice it there when its length rounds just below.
+    if shortest >= 2.0 * stated * (1.0 - 1e-9) {
         return None;
     }
     let fine = (FEATURE_MARGIN * shortest).max(MIN_TOLERANCE);
@@ -737,7 +743,15 @@ impl<'b, 'a> Builder<'b, 'a> {
             self.asm.raise_vertex(v, gap, id)?;
         }
         let i = index(self.asm.edges.len())?;
-        self.asm.edges.push(EdgeB { curve, interval, vertices, tolerance: self.asm.tol, pcurve_tolerance: self.asm.pcurve_tolerance(), form: None });
+        self.asm.edges.push(EdgeB {
+            curve,
+            interval,
+            vertices,
+            tolerance: self.asm.tol,
+            pcurve_tolerance: self.asm.pcurve_tolerance(),
+            form: None,
+            origin: Some(id),
+        });
         self.edge_ids.insert(id, (i, mapped.with_step));
         Ok((i, mapped.with_step))
     }
@@ -941,6 +955,7 @@ impl<'b, 'a> Builder<'b, 'a> {
     /// roots of their vertices' joined sets ([`Builder::join_vertices`]).
     fn finish(mut self, item: u64, name: String, shells: Vec<Vec<(u32, bool)>>, kind: Kind) -> R<Solid> {
         self.join_vertices()?;
+        self.asm.source_bytes = self.ex.source_bytes as u64;
         self.asm.finish(item, name, shells, kind)
     }
 
@@ -1050,6 +1065,7 @@ impl<'b, 'a> Builder<'b, 'a> {
                 tolerance: self.asm.tol,
                 pcurve_tolerance: self.asm.pcurve_tolerance(),
                 form: None,
+                origin: None,
             });
             self.poly_edges.insert(key, e);
             uses.push((e, forward));
