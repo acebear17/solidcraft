@@ -179,6 +179,9 @@ impl Product {
         Self::ALL.iter().copied().find(|product| product.id() == instance.0).ok_or_else(|| error(Rule::MissingTarget, "unknown application panel"))
     }
     fn available(self, app: &crate::SolveApp) -> bool {
+        if !crate::plugin_workspaces::builtin_available(app, self.id()) {
+            return false;
+        }
         let render = crate::render_workspace::active(app);
         match self {
             Self::Browser => !render && !crate::render_ui::focused(app),
@@ -392,13 +395,25 @@ impl Product {
             }
             Self::Browser => {
                 presentation.status = Some(crate::browser_search::body_count(app));
-                vec![RuntimeAction {
+                let search = RuntimeAction {
                     id: ControlId("magnifier".into()),
                     label: solidcraft_ui_text::tr("ui.browser_search_hint").into(),
                     enabled: true,
                     disabled_reason: None,
                     pressed: Some(crate::browser_search::bar_shown(app)),
-                }]
+                };
+                // The view options have no header button, so they are rows of the panel's ⋯ menu,
+                // under a View heading.
+                presentation.menu_heading = Some(solidcraft_ui_text::tr("ui.tab_view").into());
+                std::iter::once(search)
+                    .chain(crate::browser::menu_toggles(app).into_iter().map(|(id, label, on)| RuntimeAction {
+                        id: ControlId(id.into()),
+                        label: solidcraft_ui_text::tr(label).into(),
+                        enabled: true,
+                        disabled_reason: None,
+                        pressed: Some(on),
+                    }))
+                    .collect()
             }
             Self::PartsLibrary => {
                 presentation.status = crate::parts_library::status(app);
@@ -427,6 +442,7 @@ impl Product {
             status: None,
             attention: false,
             actions: Vec::new(),
+            menu_heading: None,
         }
     }
 }
@@ -730,7 +746,7 @@ pub(crate) fn drain_production_actions(app: &mut crate::SolveApp) -> PanelResult
                     crate::drawing_workspace::start(app, "drawing.sheet.add");
                 }
             }
-            Product::Browser => crate::browser::magnifier(app),
+            Product::Browser => crate::browser::menu_action(app, &action.action.0).map_err(|reason| error(Rule::Availability, reason))?,
             Product::PartsLibrary => crate::parts_library::header_action(app, &action.action.0),
             Product::RenderShots | Product::SketchOptions | Product::Bom | Product::DrawingInspector => {}
         }
@@ -1012,6 +1028,9 @@ pub(crate) fn sync_production_visibility(app: &mut crate::SolveApp) -> PanelResu
 }
 
 fn sync_bom(app: &mut crate::SolveApp) -> PanelResult<()> {
+    if !crate::plugin_workspaces::builtin_available(app, Product::Bom.id()) {
+        return Ok(());
+    }
     let Some(integration) = app.panel_runtime.as_ref() else { return Ok(()) };
     let Some(state) = integration.production.clone() else { return Ok(()) };
     let mut snapshot = state.0.try_borrow_mut().map_err(|_| error(Rule::Lifecycle, "BOM focus is borrowed"))?;
@@ -1061,6 +1080,9 @@ fn open_bom(integration: &AppPanelRuntime, layout: &Layout, instance: InstanceId
 }
 
 fn sync_sketch_options(app: &mut crate::SolveApp) -> PanelResult<()> {
+    if !crate::plugin_workspaces::builtin_available(app, Product::SketchOptions.id()) {
+        return Ok(());
+    }
     let Some(integration) = app.panel_runtime.as_ref() else { return Ok(()) };
     let Some(state) = integration.production.clone() else { return Ok(()) };
     let mut snapshot = state.0.try_borrow_mut().map_err(|_| error(Rule::Lifecycle, "application panel visibility is borrowed"))?;
@@ -1586,7 +1608,7 @@ struct ProductionServices {
 }
 impl AppPanelServices for ProductionServices {
     fn refresh_workspace(&mut self, workspace: &WorkspaceId) -> PanelResult<()> {
-        if !WORKSPACES.iter().any(|(id, _, _)| *id == workspace.0) {
+        if !WORKSPACES.iter().any(|(id, _, _)| *id == workspace.0) && !workspace.0.starts_with("plugin:") {
             return Err(error(Rule::Placement, "unregistered application layout workspace"));
         }
         self.local.workspace = workspace.clone();
@@ -1613,7 +1635,9 @@ struct ProductionLocal {
 impl ProductionLocal {
     fn validate(&self, scope: &LocalScope, instance: &InstanceId) -> PanelResult<()> {
         scope.validate()?;
-        Product::from_instance(instance)?;
+        if Product::from_instance(instance).is_err() && !instance.0.starts_with("plugin.") {
+            return Err(error(Rule::MissingTarget, "unknown application panel"));
+        }
         if scope.workspace != self.workspace || scope.document.as_ref() != Some(&self.document) || scope.viewport != self.viewport {
             return Err(error(Rule::Placement, "application panel service has a different owner scope"));
         }
