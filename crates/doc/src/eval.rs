@@ -855,6 +855,9 @@ fn fillet_fitted(
 ) -> std::result::Result<(kernel::Body, Option<Vec<f64>>, Vec<Vec3>), kernel::KernelError> {
     #[cfg(test)]
     cost_tests::count(|c| c.blends += 1);
+    if fit == crate::FilletFit::KeepEdge {
+        return kernel::fillet_keep_edge(body, edges, r).map(|b| (b, None, Vec::new()));
+    }
     match kernel::fillet_removing(body, edges, r, turn) {
         Ok((b, gone)) => Ok((b, None, gone)),
         // SMLib's refusal already computes the largest fitting radius from the cause's own
@@ -1110,10 +1113,25 @@ fn law_by_law(
     }
 }
 
-/// `Posts` for `Posts (1)`: the body a split piece was numbered after.
-fn split_piece_of(name: &str) -> Option<&str> {
+/// `Posts` and `1` for `Posts (1)`: the body a split piece was numbered after, and that number.
+fn split_piece_of(name: &str) -> Option<(&str, u32)> {
     let (base, n) = name.strip_suffix(')')?.rsplit_once(" (")?;
-    (!n.starts_with('0') && n.parse::<u32>().is_ok()).then_some(base)
+    if n.starts_with('0') {
+        return None;
+    }
+    Some((base, n.parse().ok()?))
+}
+
+/// Whether `body` still holds the extra piece a cut numbered `n` (`(1)`, `(2)`, …).
+/// That index is inside only when it is at least 1 and below the material-region count.
+/// A mesh body has none of those pieces.
+fn numbered_piece_in(body: &Body, n: u32) -> bool {
+    if body.is_mesh() {
+        return false;
+    }
+    let regions = body.record().material_regions().len();
+    let Ok(n) = usize::try_from(n) else { return false };
+    (1..regions).contains(&n)
 }
 
 /// The warning of a sketch whose profile search was cut short (#6896).
@@ -11402,15 +11420,15 @@ pub(crate) fn revolve_axis(
             other => Err(DocError::Unknown(format!("sketch axis `{other}`"))),
         },
         AxisRef::World { axis } => {
-            let d = match axis.to_ascii_uppercase().as_str() {
-                "X" => Vec3::X,
-                "Y" => Vec3::Y,
-                "Z" => Vec3::Z,
+            let (world, d) = match axis.to_ascii_uppercase().as_str() {
+                "X" => ("X", Vec3::X),
+                "Y" => ("Y", Vec3::Y),
+                "Z" => ("Z", Vec3::Z),
                 other => return Err(DocError::Unknown(format!("axis `{other}`"))),
             };
             let pl = &ss.plane;
             if d.dot(pl.normal()).abs() > 1e-9 || pl.height(Vec3::ZERO).abs() > 1e-9 {
-                return Err(DocError::Invalid(format!("the {axis} axis does not lie in the sketch plane")));
+                return Err(DocError::WorldRevolveAxisOutsideSketchPlane { axis: world });
             }
             Ok((pl.to_local(Vec3::ZERO), Vec2::new(d.dot(pl.x), d.dot(pl.y))))
         }
@@ -18345,15 +18363,16 @@ fn height_at(st: &ModelState, face: Option<(usize, usize)>, plane: &Plane, centr
     if let Some(square) = square_face_level(st, (bi, fi), plane) {
         return square.level;
     }
-    // A curved or slanted face: where the profile's middle meets it.
-    for dir in [n, n * -1.0] {
-        if let Some((t, hit_face)) = ray_face(b, centre, dir)
-            && hit_face == fi
-        {
-            return h(centre + dir * t);
-        }
+    // A curved or slanted face: where the profile's middle meets it. A surface round the sketch
+    // plane is met both ways, and the end is on the side the pick is on (#23614): the level nearer
+    // the pick's, the one along the normal when they are as near.
+    let [along, against] =
+        [n, n * -1.0].map(|dir| ray_face(b, centre, dir).filter(|(_, hit_face)| *hit_face == fi).map(|(t, _)| h(centre + dir * t)));
+    let away = |level: f64| (level - h(p)).abs();
+    match (along, against) {
+        (Some(along), Some(against)) if away(against) < away(along) => against,
+        _ => along.or(against).unwrap_or_else(|| h(p)),
     }
-    h(p)
 }
 
 /// The face a To Object pick is on: the nearest face over every solid body, `(body index,
@@ -19479,11 +19498,49 @@ fn eval_feature(
     sources: Option<&SourceStates>,
 ) -> Result<()> {
     JOINED_TARGETS.with(|n| n.borrow_mut().clear());
-    let r = eval_feature_kind(doc, vals, f, st, warning, import_report, repair, heal, prepared_meshes, prepared_import, previous_import, sources);
+    let result =
+        eval_feature_kind(doc, vals, f, st, warning, import_report, repair, heal, prepared_meshes, prepared_import, previous_import, sources);
     for note in JOINED_TARGETS.with(|n| std::mem::take(&mut *n.borrow_mut())) {
         append_warning(warning, note);
     }
-    r
+    let Err(error @ DocError::WorldRevolveAxisOutsideSketchPlane { axis: world @ ("X" | "Y") }) = &result else {
+        return result;
+    };
+
+    let mut retry = f.clone();
+    let axis = match &mut retry.kind {
+        FeatureKind::Revolve { axis, .. } | FeatureKind::SurfaceRevolve { axis, .. } => axis,
+        _ => return result,
+    };
+    let sketch = world.to_ascii_lowercase();
+    *axis = AxisRef::SketchAxis { axis: sketch.clone() };
+    if revolve_retry_succeeds(doc, vals, &retry, st, heal) {
+        return Err(DocError::Invalid(format!("{error}. Did you mean \"{sketch}\", the sketch's own axis?")));
+    }
+    result
+}
+
+/// The world axis was refused before any body changed. Test the suggested axis against the
+/// same selection, extent, and operation, with its own checks and a state we can discard.
+fn revolve_retry_succeeds(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &ModelState, heal: bool) -> bool {
+    let mut trial = st.clone();
+    let validation = EVAL_VALIDATION.get();
+    let accepted = kernel::guard(&f.name, || {
+        let _validation = EvalValidationGuard::new(validation);
+        let (result, deferred) = kernel::validating(validation, || {
+            eval_feature_kind(doc, vals, f, &mut trial, &mut None, &mut None, &mut None, heal, None, None, None, None)
+        });
+        if result.is_err() {
+            return Ok(false);
+        }
+        // The normal evaluator runs these checks outside its feature validation scope.
+        let (passed, _) = kernel::validating(kernel::Validation::EachStep, || {
+            (!deferred || check_kept(st, &trial).is_ok()) && absorb_sheet_cuts(doc, st, &mut trial, f, validation, &mut None).is_ok()
+        });
+        Ok(passed)
+    });
+    JOINED_TARGETS.with(|n| n.borrow_mut().clear());
+    matches!(accepted, Ok(true))
 }
 
 /// The start and end of the note a feature built from a sketch with a lost link carries.
@@ -20766,13 +20823,21 @@ fn eval_feature_kind(
                     // Designs saved before #2247 combined the pieces a cut split off a body that
                     // was already several pieces (`Posts`, `Posts (1)`). A cut keeps them in one
                     // body now: the piece is in `Posts`, which is a tool too or the body joined to.
+                    // A pattern copy is named the same way (`T (9)`). While its number is below the
+                    // body's material-region count (a mesh has none) it is one of those pieces; past
+                    // that the copy is gone (a pattern count lowered by a parameter), so the Combine
+                    // builds without it and says so. A numbered name listed without its seed is unknown.
                     None => match split_piece_of(t) {
-                        Some(base)
+                        Some((base, n))
                             if st.body(base).is_some()
                                 && (tools.iter().any(|o| **o == *base)
                                     || (**target == *base && matches!(operation, Operation::Join | Operation::NewBody))) =>
                         {
-                            append_warning(warning, format!("`{t}` is part of `{base}` now"));
+                            if st.body(base).is_some_and(|b| numbered_piece_in(&b.body, n)) {
+                                append_warning(warning, format!("`{t}` is part of `{base}` now"));
+                            } else {
+                                append_warning(warning, format!("`{t}` is not there any more; skipped"));
+                            }
                         }
                         // A tool whose feature is suppressed is left out, as a suppressed feature is
                         // everywhere else: the Combine builds from the tools that are there (#13474).
